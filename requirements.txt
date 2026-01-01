@@ -1,0 +1,4 @@
+playwright>=1.40
+asyncpg>=0.29
+python-dotenv
+yt-dlp>=2024.10.0
