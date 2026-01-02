@@ -20,7 +20,7 @@ async def run(query: str, *, headless: bool, limit: int | None = None) -> list[d
 				f"https://www.youtube.com/results?search_query={quote(query)}",
 				wait_until="domcontentloaded",
 			)
-
+		
 			# Optional UI-driven filters (Spanish YouTube UI)
 			await page.get_by_role("button", name="Filtros de búsqueda").click()
 			await page.get_by_role("link", name="Este mes").click()
@@ -109,6 +109,8 @@ async def run(query: str, *, headless: bool, limit: int | None = None) -> list[d
 			if limit is not None:
 				return results[: max(0, limit)]
 			return results
+		except: 
+			await page.screenshot(path="error_screenshot.png", full_page=True)
 		finally:
 			await browser.close()
 

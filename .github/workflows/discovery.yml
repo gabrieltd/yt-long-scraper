@@ -39,6 +39,13 @@ jobs:
       - name: Install Playwright browser
         run: |
           playwright install chromium
+      
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug
+          path: "*.png"
 
       - name: Run discovery
         run: |
