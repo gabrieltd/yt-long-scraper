@@ -8,17 +8,23 @@ from playwright.async_api import async_playwright
 
 import db
 from dotenv import load_dotenv
-
+import os
 async def run(query: str, *, headless: bool, limit: int | None = None) -> list[dict]:
 	async with async_playwright() as p:
 		print("⌛ Scraping iniciado con query: " + query)
 
 		browser = await p.chromium.launch(headless=headless)
 		page = await browser.new_page()
+		os.makedirs("debug", exist_ok=True)
+
 		try:
 			await page.goto(
 				f"https://www.youtube.com/results?search_query={quote(query)}",
 				wait_until="domcontentloaded",
+			)
+			await page.screenshot(
+				path="debug/01_after_goto.png",
+				full_page=True
 			)
 		
 			# Optional UI-driven filters (Spanish YouTube UI)
@@ -110,8 +116,15 @@ async def run(query: str, *, headless: bool, limit: int | None = None) -> list[d
 				return results[: max(0, limit)]
 			return results
 		except: 
-			await page.screenshot(path="error_screenshot.png", full_page=True)
+			await page.screenshot(
+				path="debug/02_no_filters_button.png",
+				full_page=True
+			)
+			return []
 		finally:
+			html = await page.content()
+			with open("debug/03_html.html", "w", encoding="utf-8") as f:
+				f.write(html)
 			await browser.close()
 
 

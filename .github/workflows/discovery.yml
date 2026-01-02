@@ -40,13 +40,13 @@ jobs:
         run: |
           playwright install chromium
       
+      - name: Run discovery
+        run: |
+          python yt_discovery.py --query "${{ matrix.query }}" --headless
+
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug
-          path: "*.png"
-
-      - name: Run discovery
-        run: |
-          python yt_discovery.py --query "${{ matrix.query }}" --headless
+          name: playwright-debug
+          path: "debug/"
