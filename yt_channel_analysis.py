@@ -199,6 +199,47 @@ async def _analyze_one_channel(channel_url: str, subscriber_count: int | None) -
 		"analysis_reason": decision_reason,
 	}
 
+async def analyze_and_persist_channel(row: dict[str, Any], *, force_single_insert: bool, buffer: list[dict[str, Any]], batch_size: int):
+	channel_url = row.get("channel_url")
+	if not isinstance(channel_url, str) or not channel_url:
+		return
+
+	subscriber_count = _coerce_int(row.get("subscriber_count"))
+
+	try:
+		result_row = await _analyze_one_channel(channel_url, subscriber_count)
+		print(f"✅ analyzed: {channel_url}")
+
+		if force_single_insert:
+			await insert_channel_analysis(result_row)
+		else:
+			buffer.append(result_row)
+			if len(buffer) >= batch_size:
+				await insert_channel_analysis_bulk(buffer)
+				buffer.clear()
+
+	except Exception as e:
+		reason = f"error: {type(e).__name__}: {str(e)[:500]}"
+		print(f"❌ failed: {channel_url} :: {reason}")
+
+		fail_row = {
+			"channel_url": channel_url,
+			"subscriber_count": subscriber_count,
+			"qualified": False,
+			"analysis_reason": reason,
+		}
+
+		if force_single_insert:
+			try:
+				await insert_channel_analysis(fail_row)
+			except Exception:
+				pass
+		else:
+			buffer.append(fail_row)
+			if len(buffer) >= batch_size:
+				await insert_channel_analysis_bulk(buffer)
+				buffer.clear()
+
 
 def _coerce_int(value: Any) -> int | None:
 	if isinstance(value, bool):
