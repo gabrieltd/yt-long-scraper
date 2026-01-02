@@ -185,6 +185,15 @@ async def init_db(
 			"""
 		)
 
+		await conn.execute(
+			"""
+			CREATE TABLE IF NOT EXISTS channels_analysis_claims (
+				channel_url TEXT PRIMARY KEY,
+				claimed_at TIMESTAMPTZ DEFAULT now()
+			);
+			"""
+		)
+
 		# Post-analysis stage: channel scoring / ranking.
 		await conn.execute(
 			"""
@@ -350,6 +359,54 @@ async def fetch_channels_pending_analysis(*, limit: int | None = None) -> list[d
 	return [dict(row) for row in rows]
 
 
+async def claim_channels_for_analysis(*, limit: int) -> list[dict[str, Any]]:
+	"""
+	Atomically claim channels for analysis so multiple workers
+	never analyze the same channel concurrently.
+	"""
+	pool = _require_pool()
+
+	async with pool.acquire() as conn:
+		claimed = await conn.fetch(
+			"""
+			WITH candidates AS (
+				SELECT r.channel_url
+				FROM channels_raw r
+				LEFT JOIN channels_analysis a
+					ON a.channel_url = r.channel_url
+				LEFT JOIN channels_analysis_claims c
+					ON c.channel_url = r.channel_url
+				WHERE a.channel_url IS NULL
+				  AND c.channel_url IS NULL
+				ORDER BY r.extracted_at ASC
+				LIMIT $1
+			)
+			INSERT INTO channels_analysis_claims (channel_url)
+			SELECT channel_url FROM candidates
+			ON CONFLICT DO NOTHING
+			RETURNING channel_url;
+			""",
+			limit,
+		)
+
+	if not claimed:
+		return []
+
+	claimed_urls = [r["channel_url"] for r in claimed]
+
+	async with pool.acquire() as conn:
+		rows = await conn.fetch(
+			"""
+			SELECT r.*
+			FROM channels_raw r
+			WHERE r.channel_url = ANY($1::text[]);
+			""",
+			claimed_urls,
+		)
+
+	return [dict(r) for r in rows]
+
+
 async def fetch_channel_long_videos(channel_url: str) -> list[dict[str, Any]]:
 	"""Fetch long videos (duration_seconds >= 1200) for a channel.
 
@@ -431,6 +488,122 @@ async def insert_channel_analysis(row: dict[str, Any]) -> None:
 			row.get("qualified") if isinstance(row.get("qualified"), bool) else None,
 			row.get("analysis_reason") if isinstance(row.get("analysis_reason"), str) else None,
 		)
+
+
+async def insert_channel_analysis_bulk(rows: list[dict[str, Any]]) -> int:
+	"""Bulk insert channels_analysis rows.
+
+	Idempotency:
+	- Uses ON CONFLICT (channel_url) DO NOTHING.
+	"""
+	if not rows:
+		return 0
+
+	pool = _require_pool()
+
+	channel_urls: list[str] = []
+	subscriber_counts: list[int | None] = []
+	cycle_start_dates: list[date | None] = []
+	cycle_long_videos_counts: list[int | None] = []
+	median_views_list: list[int | None] = []
+	max_views_list: list[int | None] = []
+	median_views_ratios: list[float | None] = []
+	max_views_ratios: list[float | None] = []
+	qualified_list: list[bool | None] = []
+	analysis_reasons: list[str | None] = []
+
+	for r in rows:
+		channel_url = r.get("channel_url")
+		if not isinstance(channel_url, str) or not channel_url:
+			continue
+
+		channel_urls.append(channel_url)
+		subscriber_counts.append(r.get("subscriber_count") if isinstance(r.get("subscriber_count"), int) else None)
+		cycle_start_dates.append(r.get("cycle_start_date") if isinstance(r.get("cycle_start_date"), date) else None)
+		cycle_long_videos_counts.append(r.get("cycle_long_videos_count") if isinstance(r.get("cycle_long_videos_count"), int) else None)
+		median_views_list.append(r.get("median_views") if isinstance(r.get("median_views"), int) else None)
+		max_views_list.append(r.get("max_views") if isinstance(r.get("max_views"), int) else None)
+		
+		# Coerce floats safely
+		med_r = r.get("median_views_ratio")
+		median_views_ratios.append(float(med_r) if isinstance(med_r, (int, float)) else None)
+		
+		max_r = r.get("max_views_ratio")
+		max_views_ratios.append(float(max_r) if isinstance(max_r, (int, float)) else None)
+		
+		qualified_list.append(r.get("qualified") if isinstance(r.get("qualified"), bool) else None)
+		analysis_reasons.append(r.get("analysis_reason") if isinstance(r.get("analysis_reason"), str) else None)
+
+	if not channel_urls:
+		return 0
+
+	async with pool.acquire() as conn:
+		res = await conn.execute(
+			"""
+			INSERT INTO channels_analysis (
+				channel_url,
+				subscriber_count,
+				cycle_start_date,
+				cycle_long_videos_count,
+				median_views,
+				max_views,
+				median_views_ratio,
+				max_views_ratio,
+				qualified,
+				analysis_reason
+			)
+			SELECT
+				v.channel_url,
+				v.subscriber_count,
+				v.cycle_start_date,
+				v.cycle_long_videos_count,
+				v.median_views,
+				v.max_views,
+				v.median_views_ratio,
+				v.max_views_ratio,
+				v.qualified,
+				v.analysis_reason
+			FROM UNNEST(
+				$1::text[],
+				$2::int[],
+				$3::date[],
+				$4::int[],
+				$5::int[],
+				$6::int[],
+				$7::real[],
+				$8::real[],
+				$9::boolean[],
+				$10::text[]
+			) AS v(
+				channel_url,
+				subscriber_count,
+				cycle_start_date,
+				cycle_long_videos_count,
+				median_views,
+				max_views,
+				median_views_ratio,
+				max_views_ratio,
+				qualified,
+				analysis_reason
+			)
+			ON CONFLICT (channel_url) DO NOTHING;
+			""",
+			channel_urls,
+			subscriber_counts,
+			cycle_start_dates,
+			cycle_long_videos_counts,
+			median_views_list,
+			max_views_list,
+			median_views_ratios,
+			max_views_ratios,
+			qualified_list,
+			analysis_reasons,
+		)
+		# "INSERT 0 123" -> 123
+		try:
+			return int(res.split(" ")[-1])
+		except (IndexError, ValueError):
+			return 0
 
 
 async def fetch_channels_for_scoring(*, limit: int | None = None) -> list[dict[str, Any]]:

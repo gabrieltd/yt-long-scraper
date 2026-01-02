@@ -341,26 +341,46 @@ def normalize_raw_video(raw: dict[str, Any], *, now: datetime | None = None) -> 
 	}
 
 
-async def run_normalization(*, limit: int | None = None) -> dict[str, int]:
-	"""Fetch unprocessed raw videos, normalize+validate, and persist results."""
+async def run_normalization(*, limit: int | None = None, bulk: bool = True) -> dict[str, int]:
+	"""Fetch unprocessed raw videos, normalize+validate, and persist results.
+	
+	Args:
+		limit: fast exit after fetching this many raw rows (approx).
+		bulk: if True, batch insert all results at once (faster).
+			  if False, insert one by one (slower, but maybe safer for partial failures).
+	"""
 	raw_rows = await db.fetch_unprocessed_videos_raw(limit=limit)
 	if not raw_rows:
 		return {"fetched": 0, "prepared": 0, "inserted": 0, "ignored": 0}
 
 	now = _utcnow()
+	
+	# Common stats
+	stats = {"fetched": len(raw_rows), "prepared": 0, "inserted": 0, "ignored": 0}
+	
 	prepared: list[dict[str, Any]] = []
 	for r in raw_rows:
 		row = normalize_raw_video(r, now=now)
 		if row is not None:
 			prepared.append(row)
+	
+	stats["prepared"] = len(prepared)
+	
+	if not prepared:
+		return stats
 
-	inserted, ignored = await db.insert_videos_normalized(prepared)
-	return {
-		"fetched": len(raw_rows),
-		"prepared": len(prepared),
-		"inserted": inserted,
-		"ignored": ignored,
-	}
+	if bulk:
+		inserted, ignored = await db.insert_videos_normalized(prepared)
+		stats["inserted"] = inserted
+		stats["ignored"] = ignored
+	else:
+		# Individual insert mode
+		for p in prepared:
+			inserted, ignored = await db.insert_videos_normalized([p])
+			stats["inserted"] += inserted
+			stats["ignored"] += ignored
+
+	return stats
 
 
 async def main() -> None:

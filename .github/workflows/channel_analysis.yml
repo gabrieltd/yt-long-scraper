@@ -1,0 +1,87 @@
+name: yt-channel-analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_workers:
+        description: "Máximo de workers permitidos"
+        required: true
+        default: "15"
+      limit_per_worker:
+        description: "Canales máximos por worker"
+        required: true
+        default: "50"
+
+jobs:
+  count-pending:
+    runs-on: ubuntu-latest
+    outputs:
+      pending: ${{ steps.count.outputs.pending }}
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - name: Count pending channels
+        id: count
+        run: |
+          PENDING=$(psql "$DATABASE_URL" -t -c "
+            SELECT COUNT(*)
+            FROM channels_raw r
+            LEFT JOIN channels_analysis a
+              ON a.channel_url = r.channel_url
+            LEFT JOIN channels_analysis_claims c
+              ON c.channel_url = r.channel_url
+            WHERE a.channel_url IS NULL
+              AND c.channel_url IS NULL;
+          ")
+          PENDING=$(echo $PENDING | xargs)
+          echo "pending=$PENDING" >> $GITHUB_OUTPUT
+
+  prepare-workers:
+    needs: count-pending
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build workers matrix
+        id: build
+        run: |
+          PENDING=${{ needs.count-pending.outputs.pending }}
+          MAX=${{ github.event.inputs.max_workers }}
+
+          if [ "$PENDING" -eq 0 ]; then
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          WORKERS=$(( PENDING < MAX ? PENDING : MAX ))
+          MATRIX=$(seq 1 $WORKERS | jq -R -s -c 'split("\n")[:-1] | map(tonumber)')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  analysis:
+    needs: prepare-workers
+    if: needs.prepare-workers.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+
+    strategy:
+      max-parallel: ${{ github.event.inputs.max_workers }}
+      matrix:
+        worker_id: ${{ fromJson(needs.prepare-workers.outputs.matrix) }}
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run channel analysis (worker ${{ matrix.worker_id }})
+        run: |
+          python yt_channel_analysis.py --limit ${{ github.event.inputs.limit_per_worker }}

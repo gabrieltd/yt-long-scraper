@@ -27,10 +27,11 @@ from dotenv import load_dotenv
 
 from db import (
 	close_db,
+	claim_channels_for_analysis,
 	fetch_channel_long_videos,
-	fetch_channels_pending_analysis,
 	init_db,
 	insert_channel_analysis,
+	insert_channel_analysis_bulk,
 )
 
 
@@ -111,55 +112,43 @@ def _decision_reason(
 	return (True, None)
 
 
-async def _analyze_one_channel(channel_url: str, subscriber_count: int | None) -> None:
-	"""Analyze a single channel and persist exactly one row in channels_analysis."""
+async def _analyze_one_channel(channel_url: str, subscriber_count: int | None) -> dict[str, Any]:
+	"""Analyze a single channel and return the result row (does NOT persist)."""
 	# Step 2: Pre-filter
 	if subscriber_count is None:
-		await insert_channel_analysis(
-			{
-				"channel_url": channel_url,
-				"subscriber_count": None,
-				"qualified": False,
-				"analysis_reason": "subscriber_count_missing",
-			}
-		)
-		return
+		return {
+			"channel_url": channel_url,
+			"subscriber_count": None,
+			"qualified": False,
+			"analysis_reason": "subscriber_count_missing",
+		}
 
 	if subscriber_count < MIN_SUBSCRIBERS:
-		await insert_channel_analysis(
-			{
-				"channel_url": channel_url,
-				"subscriber_count": int(subscriber_count),
-				"qualified": False,
-				"analysis_reason": "subscriber_count_below_100",
-			}
-		)
-		return
+		return {
+			"channel_url": channel_url,
+			"subscriber_count": int(subscriber_count),
+			"qualified": False,
+			"analysis_reason": "subscriber_count_below_100",
+		}
 
 	videos_long = await fetch_channel_long_videos(channel_url)
 	if len(videos_long) < MIN_LONG_VIDEOS_TOTAL:
-		await insert_channel_analysis(
-			{
-				"channel_url": channel_url,
-				"subscriber_count": int(subscriber_count),
-				"qualified": False,
-				"analysis_reason": "lt_3_long_videos",
-			}
-		)
-		return
+		return {
+			"channel_url": channel_url,
+			"subscriber_count": int(subscriber_count),
+			"qualified": False,
+			"analysis_reason": "lt_3_long_videos",
+		}
 
 	# Step 3: Detect current cycle (requires valid upload_date)
 	videos_dated = [v for v in videos_long if isinstance(v.get("upload_date"), date)]
 	if not videos_dated:
-		await insert_channel_analysis(
-			{
-				"channel_url": channel_url,
-				"subscriber_count": int(subscriber_count),
-				"qualified": False,
-				"analysis_reason": "upload_date_missing",
-			}
-		)
-		return
+		return {
+			"channel_url": channel_url,
+			"subscriber_count": int(subscriber_count),
+			"qualified": False,
+			"analysis_reason": "upload_date_missing",
+		}
 
 	# Deterministic ordering: date DESC, then video_id DESC.
 	videos_dated.sort(
@@ -197,20 +186,18 @@ async def _analyze_one_channel(channel_url: str, subscriber_count: int | None) -
 		median_views_ratio=median_views_ratio,
 	)
 
-	await insert_channel_analysis(
-		{
-			"channel_url": channel_url,
-			"subscriber_count": int(subscriber_count),
-			"cycle_start_date": cycle.cycle_start_date,
-			"cycle_long_videos_count": int(cycle_count),
-			"median_views": median_views,
-			"max_views": max_views,
-			"median_views_ratio": median_views_ratio,
-			"max_views_ratio": max_views_ratio,
-			"qualified": qualified,
-			"analysis_reason": decision_reason,
-		}
-	)
+	return {
+		"channel_url": channel_url,
+		"subscriber_count": int(subscriber_count),
+		"cycle_start_date": cycle.cycle_start_date,
+		"cycle_long_videos_count": int(cycle_count),
+		"median_views": median_views,
+		"max_views": max_views,
+		"median_views_ratio": median_views_ratio,
+		"max_views_ratio": max_views_ratio,
+		"qualified": qualified,
+		"analysis_reason": decision_reason,
+	}
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -237,6 +224,17 @@ def parse_args() -> argparse.Namespace:
 		default=None,
 		help="Max channels to analyze in this run (default: no limit)",
 	)
+	parser.add_argument(
+		"--batch-size",
+		type=int,
+		default=100,
+		help="Batch size for bulk insertion (default: 100).",
+	)
+	parser.add_argument(
+		"--force-single-insert",
+		action="store_true",
+		help="Force individual row insertion (disables bulk insert).",
+	)
 	return parser.parse_args()
 
 
@@ -247,8 +245,19 @@ def main() -> None:
 		load_dotenv()
 		await init_db()
 		try:
-			candidates = await fetch_channels_pending_analysis(limit=args.limit)
+			candidates = await claim_channels_for_analysis(
+				limit=args.limit or 100
+			)
 			print(f"🔎 Pending channels for analysis: {len(candidates)}")
+
+			buffer: list[dict[str, Any]] = []
+
+			async def _flush_buffer() -> None:
+				if not buffer:
+					return
+				print(f"💾 Flushing {len(buffer)} records...")
+				await insert_channel_analysis_bulk(buffer)
+				buffer.clear()
 
 			for row in candidates:
 				channel_url = row.get("channel_url")
@@ -258,24 +267,42 @@ def main() -> None:
 				subscriber_count = _coerce_int(row.get("subscriber_count"))
 
 				try:
-					await _analyze_one_channel(channel_url, subscriber_count)
+					result_row = await _analyze_one_channel(channel_url, subscriber_count)
 					print(f"✅ analyzed: {channel_url}")
+					
+					if args.force_single_insert:
+						await insert_channel_analysis(result_row)
+					else:
+						buffer.append(result_row)
+						if len(buffer) >= args.batch_size:
+							await _flush_buffer()
+
 				except Exception as e:
 					# Per requirements: do not abort the process.
 					reason = f"error: {type(e).__name__}: {str(e)[:500]}"
-					try:
-						await insert_channel_analysis(
-							{
-								"channel_url": channel_url,
-								"subscriber_count": subscriber_count,
-								"qualified": False,
-								"analysis_reason": reason,
-							}
-						)
-					except Exception:
-						# If even persisting the failure fails, keep going.
-						pass
 					print(f"❌ failed: {channel_url} :: {reason}")
+					
+					fail_row = {
+						"channel_url": channel_url,
+						"subscriber_count": subscriber_count,
+						"qualified": False,
+						"analysis_reason": reason,
+					}
+					
+					if args.force_single_insert:
+						try:
+							await insert_channel_analysis(fail_row)
+						except Exception:
+							pass
+					else:
+						buffer.append(fail_row)
+						if len(buffer) >= args.batch_size:
+							await _flush_buffer()
+
+			# Final flush
+			if not args.force_single_insert:
+				await _flush_buffer()
+
 		finally:
 			await close_db()
 
