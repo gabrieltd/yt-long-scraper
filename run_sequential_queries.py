@@ -194,6 +194,20 @@ QUERIES = [
     "versión extendida",
     "explicado a fondo",
     "explicado paso a paso",
+
+	#-----------------------------
+	# Queries generales
+	#-----------------------------
+	"meditacion",
+    "biblico",
+    "motivacion",
+    "vs",
+    "contra",
+    "batalla",
+    "quién ganaría",
+    "espiritual",
+    "alma",
+    "mente",
 ]
 
 def main():

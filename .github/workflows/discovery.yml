@@ -2,23 +2,31 @@ name: yt-discovery
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 3 * * *"   # opcional, diario
 
 jobs:
+  prepare-queries:
+    runs-on: ubuntu-latest
+    outputs:
+      queries: ${{ steps.build.outputs.queries }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Read queries.txt and build matrix
+        id: build
+        run: |
+          QUERIES=$(grep -v '^\s*$' queries.txt | jq -R -s -c 'split("\n")[:-1]')
+          echo "queries=$QUERIES" >> $GITHUB_OUTPUT
+
   discovery:
+    needs: prepare-queries
     runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: false
       max-parallel: 6
       matrix:
-        query:
-          - "historia completa de"
-          - "documental sobre"
-          - "análisis histórico de"
-          - "historia real de"
-          - "orígenes de"
+        query: ${{ fromJson(needs.prepare-queries.outputs.queries) }}
+
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
@@ -32,14 +40,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      
-      - name: Install Playwright browser
-        run: |
-          playwright install chromium
-      
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
       - name: Run discovery
         run: |
           python yt_discovery.py --query "${{ matrix.query }}" --headless
@@ -49,4 +54,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-debug-${{ matrix.query }}
-          path: "debug/"
+          path: debug/
