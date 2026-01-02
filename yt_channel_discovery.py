@@ -26,8 +26,8 @@ from typing import Any, Iterator
 from dotenv import load_dotenv
 
 from db import (
+	claim_channels_for_discovery,
 	close_db,
-	fetch_candidate_channel_urls,
 	init_db,
 	is_channel_processed,
 	mark_channel_processed,
@@ -43,6 +43,10 @@ from db import (
 # - Start conservative to avoid rate limits / network saturation.
 # - Increase only after you validate stability.
 MAX_WORKERS = 6
+
+
+# Number of channels to claim per DB round-trip.
+DISCOVERY_BATCH_SIZE = 200
 
 
 class _DBRunner:
@@ -399,42 +403,57 @@ def run(
 		# Keep asyncpg (db.py) on a single dedicated event loop/thread.
 		# init_db() creates the pool and (as designed in db.py) will create tables idempotently.
 		db.run(init_db(dsn))
-		# Fetch candidate channel URLs exactly as provided by db.py (NO grouping).
-		candidates = db.run(fetch_candidate_channel_urls(limit=limit_channels))
-		print(f"\033[92m[info] candidates fetched: {len(candidates)}\033[0m")
 		print(f"\033[92m[info] running workers: max_workers={MAX_WORKERS}\033[0m")
 
 		processed = 0
 		skipped = 0
 		failed = 0
 
-		with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-			try:
-				# Submit 1 job per channel.
-				futures = {
-					executor.submit(
-						process_one_channel,
-						channel_url,
-						db,
-						max_videos=max_videos,
-						timeout_seconds=timeout_seconds,
-					): channel_url
-					for channel_url in candidates
-				}
+		remaining = limit_channels
+		while True:
+			if remaining is not None and remaining <= 0:
+				break
 
-				# Consume results as they complete (out-of-order completion is expected).
-				for future in as_completed(futures):
-					channel_url, status = future.result()
-					if status == "processed":
-						processed += 1
-					elif status == "skipped":
-						skipped += 1
-					else:
-						failed += 1
-			except KeyboardInterrupt:
-				print(f"\n\033[91m[{_utcnow().strftime('%H:%M:%S')}][system] Interrupted by user. Exiting immediately...\033[0m")
-				# Force exit to kill threads immediately
-				os._exit(1)
+			batch_limit = DISCOVERY_BATCH_SIZE
+			if remaining is not None:
+				batch_limit = min(batch_limit, remaining)
+
+			claimed = db.run(claim_channels_for_discovery(limit=batch_limit))
+			if not claimed:
+				break
+
+			if remaining is not None:
+				remaining -= len(claimed)
+
+			print(f"\033[92m[info] claimed batch: {len(claimed)}\033[0m")
+
+			with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+				try:
+					# Submit 1 job per channel.
+					futures = {
+						executor.submit(
+							process_one_channel,
+							channel_url,
+							db,
+							max_videos=max_videos,
+							timeout_seconds=timeout_seconds,
+						): channel_url
+						for channel_url in claimed
+					}
+
+					# Consume results as they complete (out-of-order completion is expected).
+					for future in as_completed(futures):
+						channel_url, status = future.result()
+						if status == "processed":
+							processed += 1
+						elif status == "skipped":
+							skipped += 1
+						else:
+							failed += 1
+				except KeyboardInterrupt:
+					print(f"\n\033[91m[{_utcnow().strftime('%H:%M:%S')}][system] Interrupted by user. Exiting immediately...\033[0m")
+					# Force exit to kill threads immediately
+					os._exit(1)
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
 	finally:

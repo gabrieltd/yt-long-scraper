@@ -159,6 +159,15 @@ async def init_db(
 			"""
 		)
 
+		await conn.execute(
+			"""
+			CREATE TABLE IF NOT EXISTS channels_discovery_claims (
+				channel_url TEXT PRIMARY KEY,
+				claimed_at TIMESTAMPTZ DEFAULT now()
+			);
+			"""
+		)
+
 		# Final pipeline stage: channel-level analysis (post yt-dlp enrichment).
 		# IMPORTANT: this table is created here only (no schema creation elsewhere).
 		await conn.execute(
@@ -808,6 +817,48 @@ async def fetch_candidate_channel_urls(*, limit: int | None = None) -> list[str]
 			rows = await conn.fetch(base_sql + ";")
 		else:
 			rows = await conn.fetch(base_sql + "\n\t\t\tLIMIT $1;", limit)
+	return [str(r["channel_url"]) for r in rows if r.get("channel_url")]
+
+
+async def claim_channels_for_discovery(limit: int) -> list[str]:
+	"""Atomically claim candidate channels for discovery.
+
+	This turns PostgreSQL into a distributed work queue for parallel workers.
+	Only newly-claimed channel URLs are returned.
+	"""
+	if limit <= 0:
+		return []
+
+	pool = _require_pool()
+	async with pool.acquire() as conn:
+		rows = await conn.fetch(
+			"""
+			WITH candidates AS (
+				SELECT
+					n.channel_url,
+					MIN(n.normalized_at) AS first_seen
+				FROM videos_normalized n
+				LEFT JOIN channels_processed p
+					ON p.channel_url = n.channel_url
+				LEFT JOIN channels_discovery_claims c
+					ON c.channel_url = n.channel_url
+				WHERE n.validation_passed = true
+					AND n.channel_url IS NOT NULL
+					AND n.channel_url <> ''
+					AND p.channel_url IS NULL
+					AND c.channel_url IS NULL
+				GROUP BY n.channel_url
+				ORDER BY first_seen ASC
+				LIMIT $1
+			)
+			INSERT INTO channels_discovery_claims (channel_url)
+			SELECT channel_url FROM candidates
+			ON CONFLICT DO NOTHING
+			RETURNING channel_url;
+			""",
+			limit,
+		)
+
 	return [str(r["channel_url"]) for r in rows if r.get("channel_url")]
 
 
