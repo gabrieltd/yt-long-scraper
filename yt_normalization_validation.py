@@ -341,7 +341,7 @@ def normalize_raw_video(raw: dict[str, Any], *, now: datetime | None = None) -> 
 	}
 
 
-async def run_normalization(*, limit: int = 500) -> dict[str, int]:
+async def run_normalization(*, limit: int | None = None) -> dict[str, int]:
 	"""Fetch unprocessed raw videos, normalize+validate, and persist results."""
 	raw_rows = await db.fetch_unprocessed_videos_raw(limit=limit)
 	if not raw_rows:
@@ -366,7 +366,7 @@ async def run_normalization(*, limit: int = 500) -> dict[str, int]:
 async def main() -> None:
 	load_dotenv()
 	await db.init_db()
-	stats = await run_normalization(limit=2000)
+	stats = await run_normalization()
 	await db.close_db()
 	print(stats)
 

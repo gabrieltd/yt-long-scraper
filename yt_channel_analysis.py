@@ -34,13 +34,13 @@ from db import (
 )
 
 
-LONG_VIDEO_SECONDS = 1200
-GAP_DAYS = 60
+LONG_VIDEO_SECONDS = 1080
+GAP_DAYS = 30 * 5  # 5 months
 
 MIN_SUBSCRIBERS = 100
-MIN_LONG_VIDEOS_TOTAL = 3
+MIN_LONG_VIDEOS_TOTAL = 2
 
-MIN_CYCLE_LONG_VIDEOS = 3
+MIN_CYCLE_LONG_VIDEOS = 2
 MIN_HIGH_RATIO_VIDEOS = 2
 HIGH_RATIO_THRESHOLD = 0.3
 MEDIAN_RATIO_THRESHOLD = 0.25
@@ -230,7 +230,13 @@ def _coerce_int(value: Any) -> int | None:
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Analyze channels (post yt-dlp), long-videos only")
-	parser.add_argument("--limit", "-n", type=int, default=200, help="Max channels to analyze in this run")
+	parser.add_argument(
+		"--limit",
+		"-n",
+		type=int,
+		default=None,
+		help="Max channels to analyze in this run (default: no limit)",
+	)
 	return parser.parse_args()
 
 
@@ -241,7 +247,7 @@ def main() -> None:
 		load_dotenv()
 		await init_db()
 		try:
-			candidates = await fetch_channels_pending_analysis(limit=max(1, args.limit))
+			candidates = await fetch_channels_pending_analysis(limit=args.limit)
 			print(f"🔎 Pending channels for analysis: {len(candidates)}")
 
 			for row in candidates:

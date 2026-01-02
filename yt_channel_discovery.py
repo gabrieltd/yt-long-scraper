@@ -381,7 +381,7 @@ Returns:
 
 def run(
 	*,
-	limit_channels: int = 200,
+	limit_channels: int | None = None,
 	max_videos: int = 25,
 	dsn: str | None = None,
 	timeout_seconds: int = 180,
@@ -451,7 +451,7 @@ def run(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="YouTube channel enrichment (yt-dlp, no analysis)")
-	p.add_argument("--limit-channels", type=int, default=200)
+	p.add_argument("--limit-channels", type=int, default=None, help="Max channels to process (default: no limit)")
 	p.add_argument("--max-videos", type=int, default=25)
 	p.add_argument("--timeout-seconds", type=int, default=180)
 	p.add_argument(

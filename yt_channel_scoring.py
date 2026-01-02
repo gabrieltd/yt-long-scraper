@@ -23,7 +23,13 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from db import close_db, fetch_channels_for_scoring, init_db, upsert_channel_score
+from db import (
+	close_db,
+	fetch_channels_for_scoring,
+	init_db,
+	upsert_channel_score,
+	upsert_channel_scores_bulk,
+)
 
 
 # ---- Weights (fixed) ----
@@ -128,10 +134,16 @@ def _missing_reason(
 	return None
 
 
-async def _score_one(row: dict[str, Any]) -> None:
+def _score_one(row: dict[str, Any]) -> dict[str, Any] | None:
+	"""Calculate score for one channel row.
+
+	Returns:
+		Dict with score fields ready for DB upsert, or None if skipped.
+		If validation fails/excluded, returns a dict with final_score=0.
+	"""
 	channel_url = row.get("channel_url")
 	if not isinstance(channel_url, str) or not channel_url:
-		return
+		return None
 
 	subscriber_count = _coerce_int(row.get("subscriber_count"))
 	cycle_long_videos_count = _coerce_int(row.get("cycle_long_videos_count"))
@@ -149,18 +161,15 @@ async def _score_one(row: dict[str, Any]) -> None:
 
 	if reason is not None:
 		# Per requirements: final_score = 0 when excluded.
-		await upsert_channel_score(
-			{
-				"channel_url": channel_url,
-				"final_score": 0.0,
-				"s_perf": 0.0,
-				"s_peak": 0.0,
-				"s_consistency": 0.0,
-				"s_size": 0.0,
-			}
-		)
 		print(f"⛔ score=0 :: {channel_url} :: {reason}")
-		return
+		return {
+			"channel_url": channel_url,
+			"final_score": 0.0,
+			"s_perf": 0.0,
+			"s_peak": 0.0,
+			"s_consistency": 0.0,
+			"s_size": 0.0,
+		}
 
 	final_score, s_perf, s_peak, s_consistency, s_size = _score_components(
 		subscriber_count=int(subscriber_count),
@@ -169,22 +178,37 @@ async def _score_one(row: dict[str, Any]) -> None:
 		max_views_ratio=float(max_views_ratio),
 	)
 
-	await upsert_channel_score(
-		{
-			"channel_url": channel_url,
-			"final_score": final_score,
-			"s_perf": s_perf,
-			"s_peak": s_peak,
-			"s_consistency": s_consistency,
-			"s_size": s_size,
-		}
-	)
-	print(f"✅ scored: {channel_url} :: {final_score:.4f}")
+	print(f"✅ calculated: {channel_url} :: {final_score:.4f}")
+	return {
+		"channel_url": channel_url,
+		"final_score": final_score,
+		"s_perf": s_perf,
+		"s_peak": s_peak,
+		"s_consistency": s_consistency,
+		"s_size": s_size,
+	}
 
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Score analyzed channels (channels_analysis -> channels_score)")
-	parser.add_argument("--limit", "-n", type=int, default=500, help="Max channels to score in this run")
+	parser.add_argument(
+		"--limit",
+		"-n",
+		type=int,
+		default=None,
+		help="Max channels to score in this run (default: no limit)",
+	)
+	parser.add_argument(
+		"--individual",
+		action="store_true",
+		help="Upsert scores one by one immediately (slower, easier debugging)",
+	)
+	parser.add_argument(
+		"--batch-size",
+		type=int,
+		default=100,
+		help="Batch size for bulk upsert (default: 100)",
+	)
 	return parser.parse_args()
 
 
@@ -195,31 +219,52 @@ def main() -> None:
 		load_dotenv()
 		await init_db()
 		try:
-			rows = await fetch_channels_for_scoring(limit=max(1, args.limit))
+			rows = await fetch_channels_for_scoring(limit=args.limit)
 			print(f"🔢 Channels fetched for scoring: {len(rows)}")
+
+			buffer: list[dict[str, Any]] = []
+
 			for r in rows:
 				channel_url = r.get("channel_url")
 				if not isinstance(channel_url, str) or not channel_url:
 					continue
+				
+				score_data = None
 				try:
-					await _score_one(r)
+					score_data = _score_one(r)
 				except Exception as e:
 					# Per requirements: do not abort; persist score=0.
 					reason = f"error: {type(e).__name__}: {str(e)[:500]}"
+					score_data = {
+						"channel_url": channel_url,
+						"final_score": 0.0,
+						"s_perf": 0.0,
+						"s_peak": 0.0,
+						"s_consistency": 0.0,
+						"s_size": 0.0,
+					}
+					print(f"❌ score calculation failed: {channel_url} :: {reason}")
+
+				if not score_data:
+					continue
+
+				if args.individual:
 					try:
-						await upsert_channel_score(
-							{
-								"channel_url": channel_url,
-								"final_score": 0.0,
-								"s_perf": 0.0,
-								"s_peak": 0.0,
-								"s_consistency": 0.0,
-								"s_size": 0.0,
-							}
-						)
-					except Exception:
-						pass
-					print(f"❌ score failed: {channel_url} :: {reason}")
+						await upsert_channel_score(score_data)
+						# print(f"  -> saved: {channel_url}")
+					except Exception as e:
+						print(f"  -> save failed: {channel_url} : {e}")
+				else:
+					buffer.append(score_data)
+					if len(buffer) >= args.batch_size:
+						count = await upsert_channel_scores_bulk(buffer)
+						print(f"📦 Bulk upserted {count} scores...")
+						buffer = []
+
+			# Final flush
+			if buffer and not args.individual:
+				count = await upsert_channel_scores_bulk(buffer)
+				print(f"📦 Bulk upserted final {count} scores.")
 		finally:
 			await close_db()
 

@@ -325,15 +325,13 @@ def _parse_upload_date(value: str | None) -> date | None:
 	return None
 
 
-async def fetch_channels_pending_analysis(*, limit: int = 200) -> list[dict[str, Any]]:
+async def fetch_channels_pending_analysis(*, limit: int | None = None) -> list[dict[str, Any]]:
 	"""Select channels that exist in channels_raw but not yet in channels_analysis."""
-	if limit <= 0:
+	if limit is not None and limit <= 0:
 		return []
 
 	pool = _require_pool()
-	async with pool.acquire() as conn:
-		rows = await conn.fetch(
-			"""
+	base_sql = """
 			SELECT r.channel_url, r.subscriber_count
 			FROM channels_raw r
 			LEFT JOIN channels_analysis a
@@ -342,10 +340,12 @@ async def fetch_channels_pending_analysis(*, limit: int = 200) -> list[dict[str,
 				AND r.channel_url <> ''
 				AND a.channel_url IS NULL
 			ORDER BY r.extracted_at ASC
-			LIMIT $1;
-			""",
-			limit,
-		)
+	"""
+	async with pool.acquire() as conn:
+		if limit is None:
+			rows = await conn.fetch(base_sql + ";")
+		else:
+			rows = await conn.fetch(base_sql + "\n\t\t\tLIMIT $1;", limit)
 	return [dict(row) for row in rows]
 
 
@@ -432,18 +432,16 @@ async def insert_channel_analysis(row: dict[str, Any]) -> None:
 		)
 
 
-async def fetch_channels_for_scoring(*, limit: int = 500) -> list[dict[str, Any]]:
+async def fetch_channels_for_scoring(*, limit: int | None = None) -> list[dict[str, Any]]:
 	"""Fetch channels_analysis rows for scoring.
 
 	Scoring can be re-run; this function does NOT exclude channels already scored.
 	"""
-	if limit <= 0:
+	if limit is not None and limit <= 0:
 		return []
 
 	pool = _require_pool()
-	async with pool.acquire() as conn:
-		rows = await conn.fetch(
-			"""
+	base_sql = """
 			SELECT
 				channel_url,
 				subscriber_count,
@@ -454,10 +452,12 @@ async def fetch_channels_for_scoring(*, limit: int = 500) -> list[dict[str, Any]
 				analysis_reason
 			FROM channels_analysis
 			ORDER BY analyzed_at ASC
-			LIMIT $1;
-			""",
-			limit,
-		)
+	"""
+	async with pool.acquire() as conn:
+		if limit is None:
+			rows = await conn.fetch(base_sql + ";")
+		else:
+			rows = await conn.fetch(base_sql + "\n\t\t\tLIMIT $1;", limit)
 	return [dict(r) for r in rows]
 
 
@@ -504,7 +504,109 @@ async def upsert_channel_score(row: dict[str, Any]) -> None:
 		)
 
 
-async def fetch_candidate_channel_urls(*, limit: int = 200) -> list[str]:
+async def upsert_channel_scores_bulk(rows: list[dict[str, Any]]) -> int:
+	"""Bulk upsert channel scores.
+
+	Returns:
+		Number of rows inserted/updated.
+	"""
+	if not rows:
+		return 0
+
+	pool = _require_pool()
+
+	channel_urls: list[str] = []
+	final_scores: list[float | None] = []
+	s_perfs: list[float | None] = []
+	s_peaks: list[float | None] = []
+	s_consistencies: list[float | None] = []
+	s_sizes: list[float | None] = []
+	scored_ats: list[datetime | None] = []
+
+	for r in rows:
+		channel_url = r.get("channel_url")
+		if not isinstance(channel_url, str) or not channel_url:
+			continue
+
+		channel_urls.append(channel_url)
+
+		def _f(k: str) -> float | None:
+			v = r.get(k)
+			return float(v) if isinstance(v, (int, float)) else None
+
+		final_scores.append(_f("final_score"))
+		s_perfs.append(_f("s_perf"))
+		s_peaks.append(_f("s_peak"))
+		s_consistencies.append(_f("s_consistency"))
+		s_sizes.append(_f("s_size"))
+
+		ts = r.get("scored_at")
+		scored_ats.append(ts if isinstance(ts, datetime) else None)
+
+	if not channel_urls:
+		return 0
+
+	async with pool.acquire() as conn:
+		res = await conn.execute(
+			"""
+			INSERT INTO channels_score (
+				channel_url,
+				final_score,
+				s_perf,
+				s_peak,
+				s_consistency,
+				s_size,
+				scored_at
+			)
+			SELECT
+				v.channel_url,
+				v.final_score,
+				v.s_perf,
+				v.s_peak,
+				v.s_consistency,
+				v.s_size,
+				COALESCE(v.scored_at, now())
+			FROM UNNEST(
+				$1::text[],
+				$2::real[],
+				$3::real[],
+				$4::real[],
+				$5::real[],
+				$6::real[],
+				$7::timestamptz[]
+			) AS v(
+				channel_url,
+				final_score,
+				s_perf,
+				s_peak,
+				s_consistency,
+				s_size,
+				scored_at
+			)
+			ON CONFLICT (channel_url) DO UPDATE SET
+				final_score = EXCLUDED.final_score,
+				s_perf = EXCLUDED.s_perf,
+				s_peak = EXCLUDED.s_peak,
+				s_consistency = EXCLUDED.s_consistency,
+				s_size = EXCLUDED.s_size,
+				scored_at = EXCLUDED.scored_at;
+			""",
+			channel_urls,
+			final_scores,
+			s_perfs,
+			s_peaks,
+			s_consistencies,
+			s_sizes,
+			scored_ats,
+		)
+		# "INSERT 0 123" -> 123
+		try:
+			return int(res.split(" ")[-1])
+		except (IndexError, ValueError):
+			return 0
+
+
+async def fetch_candidate_channel_urls(*, limit: int | None = None) -> list[str]:
 	"""Return candidate channel URLs for enrichment.
 
 	Selection rules (per pipeline contract):
@@ -512,13 +614,11 @@ async def fetch_candidate_channel_urls(*, limit: int = 200) -> list[str]:
 	- Exclude channels already in channels_processed.
 	- Do NOT group by channel (duplicates are allowed).
 	"""
-	if limit <= 0:
+	if limit is not None and limit <= 0:
 		return []
 
 	pool = _require_pool()
-	async with pool.acquire() as conn:
-		rows = await conn.fetch(
-			"""
+	base_sql = """
 			SELECT n.channel_url
 			FROM videos_normalized n
 			LEFT JOIN channels_processed p
@@ -528,10 +628,12 @@ async def fetch_candidate_channel_urls(*, limit: int = 200) -> list[str]:
 				AND n.channel_url <> ''
 				AND p.channel_url IS NULL
 			ORDER BY n.normalized_at ASC
-			LIMIT $1;
-			""",
-			limit,
-		)
+	"""
+	async with pool.acquire() as conn:
+		if limit is None:
+			rows = await conn.fetch(base_sql + ";")
+		else:
+			rows = await conn.fetch(base_sql + "\n\t\t\tLIMIT $1;", limit)
 	return [str(r["channel_url"]) for r in rows if r.get("channel_url")]
 
 
@@ -702,7 +804,7 @@ async def mark_channel_processed(
 		)
 
 
-async def fetch_unprocessed_videos_raw(*, limit: int = 500) -> list[dict[str, Any]]:
+async def fetch_unprocessed_videos_raw(*, limit: int | None = None) -> list[dict[str, Any]]:
 	"""Fetch raw videos that have not yet been normalized.
 
 	Idempotency:
@@ -711,13 +813,11 @@ async def fetch_unprocessed_videos_raw(*, limit: int = 500) -> list[dict[str, An
 	Args:
 		limit: Maximum number of raw rows to return.
 """
-	if limit <= 0:
+	if limit is not None and limit <= 0:
 		return []
 
 	pool = _require_pool()
-	async with pool.acquire() as conn:
-		rows = await conn.fetch(
-			"""
+	base_sql = """
 			SELECT
 				r.video_id,
 				r.channel_url,
@@ -730,10 +830,12 @@ async def fetch_unprocessed_videos_raw(*, limit: int = 500) -> list[dict[str, An
 				ON n.video_id = r.video_id
 			WHERE n.video_id IS NULL
 			ORDER BY r.discovered_at ASC
-			LIMIT $1;
-			""",
-			limit,
-		)
+	"""
+	async with pool.acquire() as conn:
+		if limit is None:
+			rows = await conn.fetch(base_sql + ";")
+		else:
+			rows = await conn.fetch(base_sql + "\n\t\t\tLIMIT $1;", limit)
 	return [dict(row) for row in rows]
 
 
