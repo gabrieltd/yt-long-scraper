@@ -62,6 +62,7 @@ async def init_db(
 		min_size=min_size,
 		max_size=max_size,
 		command_timeout=60,
+		statement_cache_size=0,
 	)
 
 	async with _POOL.acquire() as conn:
