@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      max-parallel: 6
+      max-parallel: 18
       matrix:
         query: ${{ fromJson(needs.prepare-queries.outputs.queries) }}
 
