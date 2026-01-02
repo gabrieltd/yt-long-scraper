@@ -14,7 +14,24 @@ async def run(query: str, *, headless: bool, limit: int | None = None) -> list[d
 		print("⌛ Scraping iniciado con query: " + query)
 
 		browser = await p.chromium.launch(headless=headless)
-		page = await browser.new_page()
+
+		context = await browser.new_context(
+			locale="es-MX",
+			timezone_id="America/Mexico_City",
+			viewport={"width": 1920, "height": 1080},
+			user_agent=(
+				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+				"AppleWebKit/537.36 (KHTML, like Gecko) "
+				"Chrome/120.0.0.0 Safari/537.36"
+			),
+			is_mobile=False,
+			has_touch=False,
+			extra_http_headers={
+				"Accept-Language": "es-MX,es;q=0.9"
+			},
+		)
+
+		page = await context.new_page()
 		os.makedirs("debug", exist_ok=True)
 
 		try:
