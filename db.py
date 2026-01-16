@@ -27,8 +27,8 @@ async def init_db(dsn: str | None = None) -> None:
     if not dsn:
         raise RuntimeError("DATABASE_URL environment variable not set")
 
-    # Create a connection pool
-    _DB_POOL = await asyncpg.create_pool(dsn)
+    # Create a connection pool with statement cache disabled for PgBouncer compatibility
+    _DB_POOL = await asyncpg.create_pool(dsn, statement_cache_size=0)
 
     async with _DB_POOL.acquire() as conn:
         # Schema creation
