@@ -1,24 +1,23 @@
 # Troubleshooting
 
-## 1) Error: no se pudo conectar a Postgres / DSN no configurado
+## 1) Problemas con SQLite / youtube.db
 
 Síntoma típico:
-- `RuntimeError: PostgreSQL DSN not configured. Set DATABASE_URL (or POSTGRES_DSN).`
+- `sqlite3.OperationalError: database is locked`
 
 Solución:
-- Crea `.env` (puedes copiar [`.env.example`](../.env.example)).
-- Asegura `DATABASE_URL` correcto.
-- Si usas Docker: verifica que `docker compose ps` muestre Postgres healthy.
+- Asegúrate de no tener el archivo `youtube.db` abierto en otro programa (como un visor SQL) mientras corren los scripts.
+- El sistema usa `WAL mode` para permitir concurrencia, pero bloqueos largos externos pueden afectar.
 
 ## 2) Playwright falla al hacer click en filtros / YouTube cambió UI
 
 Síntomas:
 - `TimeoutError` esperando selector
-- No encuentra el botón “Filtros de búsqueda” o “Este mes” / “Más de 20 minutos”
+- No encuentra el botón “Filtros de búsqueda”
 
 Causas comunes:
 - YouTube cambió roles/nombres en el HTML.
-- Diferente idioma en UI.
+- Diferente idioma en UI (el script fuerza locale es-MX).
 - Te muestra un interstitial (consentimiento/cookies).
 
 Acciones recomendadas:
@@ -28,7 +27,7 @@ Acciones recomendadas:
 python yt_discovery.py --query "documental" --headed
 ```
 
-- Ajusta los nombres/roles en [yt_discovery.py](../yt_discovery.py) si la UI cambió.
+- Ajusta los selectores en [yt_discovery.py](../yt_discovery.py).
 
 ## 3) yt-dlp falla / timeouts / 429 / bloqueos
 
@@ -39,20 +38,9 @@ Síntomas:
 Mitigaciones:
 - Reduce concurrencia (`MAX_WORKERS`) en [yt_channel_discovery.py](../yt_channel_discovery.py).
 - Baja `--max-videos` y/o `--limit-channels`.
-- Reintenta luego (fallos transitorios no se marcan como processed, salvo fallos permanentes detectados).
+- Reintenta luego.
 
-## 4) El dashboard no muestra resultados
-
-El dashboard solo lee de:
-- `channels_score`
-- `channels_analysis`
-
-Checklist:
-- ¿Corriste `yt_channel_analysis.py` y `yt_channel_scoring.py`?
-- ¿Hay datos válidos en `videos_normalized` (con `validation_passed=true`)?
-- ¿La conexión a Postgres apunta al DB correcto?
-
-## 5) Normalización “rechaza todo” (muchos `validation_passed=false`)
+## 4) Normalización “rechaza todo” (muchos `validation_passed=false`)
 
 Reglas actuales (mínimas):
 - Duración >= 20 minutos
@@ -62,20 +50,18 @@ Reglas actuales (mínimas):
 Si tu nicho requiere otras reglas, cambia la lógica en:
 - [yt_normalization_validation.py](../yt_normalization_validation.py)
 
-## 6) Problemas con entorno en Windows
+## 5) Problemas con entorno en Windows
 
 - Activa venv en PowerShell:
   - `.\.venv\Scripts\Activate.ps1`
 - Si PowerShell bloquea scripts:
   - `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
-## 7) Limpieza / reset
+## 6) Limpieza / reset
 
-Reset total de BD (Docker):
+Si deseas comenzar de cero (borrar todos los datos):
 
-```bash
-docker compose down -v
-docker compose up -d
-```
+1. Detén cualquier script en ejecución.
+2. Elimina el archivo `youtube.db` del directorio raíz.
+3. Vuelve a ejecutar cualquier script (la DB se recreará automáticamente).
 
-Esto borra las tablas/datos porque elimina el volumen.
