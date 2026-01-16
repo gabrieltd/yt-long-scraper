@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -10,6 +11,8 @@ import db
 from dotenv import load_dotenv
 import os
 async def run(query: str, *, headless: bool, limit: int | None = None) -> list[dict]:
+	# Force UTF-8 output to handle emojis on Windows CI
+	sys.stdout.reconfigure(encoding='utf-8')
 	async with async_playwright() as p:
 		print("⌛ Scraping iniciado con query: " + query)
 
