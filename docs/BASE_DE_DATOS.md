@@ -1,10 +1,12 @@
-# Base de datos (SQLite)
+# Base de datos (PostgreSQL)
 
-El proyecto utiliza **SQLite** como motor de base de datos local. El archivo de base de datos se crea automáticamente como `youtube.db` en la raíz del proyecto al ejecutar los scripts.
+El proyecto utiliza **PostgreSQL** como motor de base de datos.
+Se requiere una instancia de PostgreSQL en ejecución y configurar la variable de entorno `DATABASE_URL` en el archivo `.env`.
 
 ## Conexión
 
-Se utiliza la librería `aiosqlite` para accesos asíncronos. No se requiere configuración de servidor ni credenciales.
+Se utiliza la librería `asyncpg` para accesos asíncronos de alto rendimiento.
+La conexión utiliza un *connection pool* gestionado globalmente.
 
 El script [db.py](../db.py) maneja toda la lógica de conexión y esquema.
 
@@ -18,8 +20,8 @@ Campos:
 - `id` (TEXT/UUID, PK)
 - `query` (TEXT)
 - `mode` (TEXT)
-- `started_at` (TEXT/ISO8601)
-- `finished_at` (TEXT/ISO8601)
+- `started_at` (TIMESTAMPTZ)
+- `finished_at` (TIMESTAMPTZ)
 
 ### `videos_raw`
 
@@ -36,8 +38,8 @@ Campos clave:
 - `published_text` (TEXT)
 - `thumbnail_url` (TEXT)
 - `video_type` (TEXT)
-- `is_multi_creator` (INTEGER/BOOLEAN)
-- `discovered_at` (TEXT/ISO8601)
+- `is_multi_creator` (BOOLEAN)
+- `discovered_at` (TIMESTAMPTZ)
 
 ### `videos_normalized`
 
@@ -47,12 +49,12 @@ Campos clave:
 - `video_id` (TEXT, PK, FK → `videos_raw.video_id`)
 - `channel_url` (TEXT)
 - `query` (TEXT)
-- `views_estimated` (INTEGER)
-- `published_at_estimated` (TEXT/ISO8601)
-- `duration_seconds_estimated` (INTEGER)
-- `validation_passed` (INTEGER/BOOLEAN)
+- `views_estimated` (BIGINT)
+- `published_at_estimated` (TIMESTAMPTZ)
+- `duration_seconds_estimated` (BIGINT)
+- `validation_passed` (BOOLEAN)
 - `validation_reason` (TEXT)
-- `normalized_at` (TEXT/ISO8601)
+- `normalized_at` (TIMESTAMPTZ)
 
 ### `channels_raw`
 
@@ -62,9 +64,9 @@ Campos:
 - `channel_url` (TEXT, PK)
 - `channel_id` (TEXT)
 - `channel_name` (TEXT)
-- `subscriber_count` (INTEGER)
-- `is_verified` (INTEGER/BOOLEAN)
-- `extracted_at` (TEXT/ISO8601)
+- `subscriber_count` (BIGINT)
+- `is_verified` (BOOLEAN)
+- `extracted_at` (TIMESTAMPTZ)
 
 ### `channel_videos_raw`
 
@@ -74,8 +76,8 @@ Campos:
 - `channel_url` (TEXT)
 - `video_id` (TEXT)
 - `upload_date` (TEXT)
-- `duration_seconds` (INTEGER)
-- `view_count` (INTEGER)
+- `duration_seconds` (BIGINT)
+- `view_count` (BIGINT)
 
 PK compuesta: `(channel_url, video_id)`
 
@@ -85,7 +87,7 @@ Marca idempotente de canales ya procesados.
 
 Campos:
 - `channel_url` (TEXT, PK)
-- `processed_at` (TEXT/ISO8601)
+- `processed_at` (TIMESTAMPTZ)
 - `status` (TEXT, default `success`)
 
 ### `channels_discovery_claims`
@@ -94,8 +96,8 @@ Coordinación de workers.
 
 Campos:
 - `channel_url` (TEXT, PK)
-- `claimed_at` (TEXT/ISO8601)
+- `claimed_at` (TIMESTAMPTZ)
 
 ## Operación idempotente
 
-La mayoría de inserts usan `INSERT OR IGNORE` o `ON CONFLICT` para permitir re-ejecuciones seguras.
+La mayoría de inserts usan `ON CONFLICT DO NOTHING` o `ON CONFLICT DO UPDATE` para permitir re-ejecuciones seguras.

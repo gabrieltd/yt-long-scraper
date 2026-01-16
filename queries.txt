@@ -416,11 +416,6 @@ democracia
 elecciones
 voto
 derechos humanos
-feminismo
-igualdad de genero
-lgbt
-diversidad
-inclusicon
 racismo
 discriminacion
 justicia social
@@ -443,7 +438,6 @@ planeta tierra
 national geographic
 discovery channel
 history channel
-bbc earth
 cosmos
 carl sagan
 neil degrasse tyson
