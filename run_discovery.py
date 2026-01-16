@@ -18,6 +18,9 @@ async def get_already_run_queries() -> set[str]:
         return set()
 
 def main():
+    # Force UTF-8 output to handle emojis on Windows CI
+    sys.stdout.reconfigure(encoding='utf-8')
+
     parser = argparse.ArgumentParser(description="Run YouTube discovery on queries.")
     parser.add_argument("--batch-size", type=int, help="Number of queries per batch")
     parser.add_argument("--batch-index", type=int, help="Index of the batch to run (0-based)")
