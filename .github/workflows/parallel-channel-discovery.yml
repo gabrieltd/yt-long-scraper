@@ -1,0 +1,71 @@
+name: Parallel Channel Discovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      channels_per_job:
+        description: 'Number of channels to process per job'
+        required: true
+        default: '100'
+        type: string
+      max_jobs:
+        description: 'Number of parallel jobs to spawn'
+        required: true
+        default: '5'
+        type: string
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Generate Matrix
+        id: set-matrix
+        run: |
+          MAX_JOBS=${{ inputs.max_jobs }}
+          echo "Generating matrix for $MAX_JOBS jobs..."
+          
+          # Generate JSON array [0, 1, ... N-1]
+          MATRIX_JSON="["
+          for (( i=0; i<MAX_JOBS; i++ )); do
+            MATRIX_JSON="$MATRIX_JSON$i"
+            if [ $i -lt $((MAX_JOBS-1)) ]; then
+              MATRIX_JSON="$MATRIX_JSON, "
+            fi
+          done
+          MATRIX_JSON="$MATRIX_JSON]"
+          
+          echo "Generated Matrix: $MATRIX_JSON"
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
+  channel-discovery:
+    needs: prepare-matrix
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job_index: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+
+      - name: Run Channel Discovery
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Starting Job ${{ matrix.job_index }} processing ${{ inputs.channels_per_job }} channels"
+          # The script uses DB claiming, so multiple jobs will automatically pick different channels.
+          # We pass limit-channels to control batch size per job.
+          python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }}
