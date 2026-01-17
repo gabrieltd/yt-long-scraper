@@ -46,7 +46,8 @@ def parse_views_text(views_text: str | None) -> int | None:
 
 	lower = text.lower()
 	# Common “no views” patterns.
-	if any(p in lower for p in ("no views", "sin vistas", "0 views", "0 vistas")):
+	# Common “no views” patterns.
+	if any(p in lower for p in ("no views", "sin vistas")):
 		return 0
 
 	# Remove words around the number.
@@ -278,23 +279,10 @@ def validate_video(
 	if now.tzinfo is None:
 		now = now.replace(tzinfo=timezone.utc)
 
-	if duration_seconds_estimated is None:
-		return ValidationResult(False, "duration_missing")
-	if duration_seconds_estimated < 1200:
-		return ValidationResult(False, "duration_too_short")
+	if duration_seconds_estimated is not None and duration_seconds_estimated < 180:
+		return ValidationResult(False, "duration_too_low")
 
-	if published_at_estimated is None:
-		return ValidationResult(False, "published_missing")
-	if published_at_estimated.tzinfo is None:
-		published_at_estimated = published_at_estimated.replace(tzinfo=timezone.utc)
-	if published_at_estimated > now:
-		return ValidationResult(False, "published_in_future")
-	if now - published_at_estimated > timedelta(days=60):
-		return ValidationResult(False, "published_too_old")
-
-	if views_estimated is None:
-		return ValidationResult(False, "views_missing")
-	if views_estimated < 1000:
+	if views_estimated is not None and views_estimated < 1000:
 		return ValidationResult(False, "views_too_low")
 
 	return ValidationResult(True, None)

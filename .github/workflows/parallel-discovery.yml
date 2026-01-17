@@ -17,33 +17,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      
       - name: Calculate Matrix
         id: set-matrix
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          # Count non-empty lines in queries.txt
-          TOTAL_QUERIES=$(grep -cve '^\s*$' queries.txt)
-          BATCH_SIZE=${{ inputs.batch_size }}
+          pip install -r requirements.txt
           
-          echo "Total Queries: $TOTAL_QUERIES"
-          echo "Batch Size: $BATCH_SIZE"
+          # Use the python script to get exactly which batches have pending queries
+          # This requires the DATABASE_URL to be present in this job's environment
+          python run_discovery.py --check-batches --batch-size ${{ inputs.batch_size }} > matrix.json
           
-          # Calculate number of batches needed (ceiling division)
-          # (total + batch_size - 1) / batch_size
-          BATCH_COUNT=$(( (TOTAL_QUERIES + BATCH_SIZE - 1) / BATCH_SIZE ))
-          
-          echo "Batches needed: $BATCH_COUNT"
-          
-          # Generate JSON array [0, 1, ... N-1]
-          # Since GitHub Actions matrix needs a JSON string
-          MATRIX_JSON="["
-          for (( i=0; i<BATCH_COUNT; i++ )); do
-            MATRIX_JSON="$MATRIX_JSON$i"
-            if [ $i -lt $((BATCH_COUNT-1)) ]; then
-              MATRIX_JSON="$MATRIX_JSON, "
-            fi
-          done
-          MATRIX_JSON="$MATRIX_JSON]"
-          
+          MATRIX_JSON=$(cat matrix.json)
           echo "Generated Matrix: $MATRIX_JSON"
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 

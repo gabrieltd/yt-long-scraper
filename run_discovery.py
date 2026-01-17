@@ -4,8 +4,10 @@ import subprocess
 import asyncio
 import argparse
 import math
+import json
 from pathlib import Path
 import db
+from dotenv import load_dotenv
 
 async def get_already_run_queries() -> set[str]:
     try:
@@ -18,12 +20,14 @@ async def get_already_run_queries() -> set[str]:
         return set()
 
 def main():
+    load_dotenv()
     # Force UTF-8 output to handle emojis on Windows CI
     sys.stdout.reconfigure(encoding='utf-8')
 
     parser = argparse.ArgumentParser(description="Run YouTube discovery on queries.")
     parser.add_argument("--batch-size", type=int, help="Number of queries per batch")
     parser.add_argument("--batch-index", type=int, help="Index of the batch to run (0-based)")
+    parser.add_argument("--check-batches", action="store_true", help="Return JSON list of batch indices that have pending queries")
     args = parser.parse_args()
 
     queries_file = Path("queries.txt")
@@ -37,6 +41,31 @@ def main():
         queries = [line.strip() for line in f if line.strip()]
 
     total_queries = len(queries)
+
+    # Mode: Check Batches
+    if args.check_batches:
+        if not args.batch_size:
+            print("To check batches, you must provide --batch-size.")
+            sys.exit(1)
+
+        already_run = asyncio.run(get_already_run_queries())
+        batch_size = args.batch_size
+        needed_batches = []
+        
+        batch_count = math.ceil(total_queries / batch_size)
+        
+        for i in range(batch_count):
+            start = i * batch_size
+            end = start + batch_size
+            batch_queries = queries[start:min(end, total_queries)]
+            
+            # If ANY query in this batch is not in already_run, we need this batch
+            if any(q for q in batch_queries if q not in already_run):
+                needed_batches.append(i)
+        
+        # Print ONLY the JSON list (no other text to stdout to avoid parsing issues)
+        print(json.dumps(needed_batches))
+        return
     
     # Logic for batching
     if args.batch_size is not None and args.batch_index is not None:

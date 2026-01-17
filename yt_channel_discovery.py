@@ -73,7 +73,14 @@ class _DBRunner:
 		def _thread_main() -> None:
 			# Dedicated event loop for all DB operations.
 			# (asyncpg connections/pool are bound to a loop)
-			loop = asyncio.new_event_loop()
+			if sys.platform == "win32":
+				# ProactorEventLoop (default on Py3.8+ Win) can cause "WinError 121"
+				# (Semaphore timeout) with asyncpg under load or specific network conditions.
+				# SelectorEventLoop is more stable for pure socket I/O (no subprocesses needed here).
+				loop = asyncio.WindowsSelectorEventLoopPolicy().new_event_loop()
+			else:
+				loop = asyncio.new_event_loop()
+			
 			asyncio.set_event_loop(loop)
 			self._loop = loop
 			self._started.set()
@@ -143,7 +150,7 @@ def _coerce_bool(value: Any) -> bool | None:
 def run_ytdlp_channel_dump(
 	channel_url: str,
 	*,
-	max_videos: int = 25,
+	max_videos: int = 70,
 	timeout_seconds: int = 180,
 ) -> dict[str, Any]:
 	"""Run yt-dlp for a channel URL and return the parsed JSON.
@@ -159,6 +166,7 @@ def run_ytdlp_channel_dump(
 	if max_videos <= 0:
 		max_videos = 1
 
+	channel_url_videos = channel_url + "/videos"
 	cmd = [
 		sys.executable,
 		"-m",
@@ -171,7 +179,7 @@ def run_ytdlp_channel_dump(
 		str(max_videos),
 		"--skip-download",
 		"--no-warnings",
-		channel_url,
+		channel_url_videos,
 	]
 
 	print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][yt-dlp] fetching: {channel_url}...\033[0m")
@@ -268,7 +276,7 @@ def parse_channel_videos_raw(
 	channel_url: str,
 	dump: dict[str, Any],
 	*,
-	max_videos: int = 25,
+	max_videos: int = 70,
 ) -> list[dict[str, Any]]:
 	"""Extract last-N videos from a yt-dlp dump (flat playlist entries)."""
 	raw_entries = dump.get("entries")
@@ -326,7 +334,7 @@ def process_one_channel(
 	channel_url: str,
 	db: _DBRunner,
 	*,
-	max_videos: int = 25,
+	max_videos: int = 70,
 	timeout_seconds: int = 180,
 	# Note: DB operations are executed on the db runner loop.
 ) -> tuple[str, str]:
@@ -386,7 +394,7 @@ Returns:
 def run(
 	*,
 	limit_channels: int | None = None,
-	max_videos: int = 25,
+	max_videos: int = 50,
 	dsn: str | None = None,
 	timeout_seconds: int = 180,
 ) -> None:
@@ -471,7 +479,7 @@ def run(
 def _build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="YouTube channel enrichment (yt-dlp, no analysis)")
 	p.add_argument("--limit-channels", type=int, default=None, help="Max channels to process (default: no limit)")
-	p.add_argument("--max-videos", type=int, default=25)
+	p.add_argument("--max-videos", type=int, default=70)
 	p.add_argument("--timeout-seconds", type=int, default=180)
 	p.add_argument(
 		"--dsn",
