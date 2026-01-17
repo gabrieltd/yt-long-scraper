@@ -40,7 +40,7 @@ jobs:
 
   discovery:
     needs: prepare-matrix
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
