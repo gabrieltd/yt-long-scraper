@@ -28,9 +28,10 @@ def main():
     parser.add_argument("--batch-size", type=int, help="Number of queries per batch")
     parser.add_argument("--batch-index", type=int, help="Index of the batch to run (0-based)")
     parser.add_argument("--check-batches", action="store_true", help="Return JSON list of batch indices that have pending queries")
+    parser.add_argument("--queries-file", type=str, default="queries.txt", help="File containing queries to process (default: queries.txt)")
     args = parser.parse_args()
 
-    queries_file = Path("queries.txt")
+    queries_file = Path(args.queries_file)
     if not queries_file.exists():
         print(f"❌ Error: {queries_file} no encontrado.")
         return

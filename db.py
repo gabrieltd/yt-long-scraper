@@ -17,7 +17,7 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def init_db(dsn: str | None = None) -> None:
+async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20) -> None:
     """Initialize the PostgreSQL connection pool and schema."""
     global _DB_POOL
     if _DB_POOL is not None:
@@ -28,7 +28,13 @@ async def init_db(dsn: str | None = None) -> None:
         raise RuntimeError("DATABASE_URL environment variable not set")
 
     # Create a connection pool with statement cache disabled for PgBouncer compatibility
-    _DB_POOL = await asyncpg.create_pool(dsn, statement_cache_size=0)
+    # Defaulting to min_size=1 usually saves resources in serverless/container envs.
+    _DB_POOL = await asyncpg.create_pool(
+        dsn, 
+        min_size=min_size, 
+        max_size=max_size, 
+        statement_cache_size=0
+    )
 
     async with _DB_POOL.acquire() as conn:
         # Schema creation

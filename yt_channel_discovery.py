@@ -150,7 +150,7 @@ def _coerce_bool(value: Any) -> bool | None:
 def run_ytdlp_channel_dump(
 	channel_url: str,
 	*,
-	max_videos: int = 70,
+	max_videos: int = 40,
 	timeout_seconds: int = 180,
 ) -> dict[str, Any]:
 	"""Run yt-dlp for a channel URL and return the parsed JSON.
@@ -276,7 +276,7 @@ def parse_channel_videos_raw(
 	channel_url: str,
 	dump: dict[str, Any],
 	*,
-	max_videos: int = 70,
+	max_videos: int = 40,
 ) -> list[dict[str, Any]]:
 	"""Extract last-N videos from a yt-dlp dump (flat playlist entries)."""
 	raw_entries = dump.get("entries")
@@ -334,7 +334,7 @@ def process_one_channel(
 	channel_url: str,
 	db: _DBRunner,
 	*,
-	max_videos: int = 70,
+	max_videos: int = 40,
 	timeout_seconds: int = 180,
 	# Note: DB operations are executed on the db runner loop.
 ) -> tuple[str, str]:
@@ -410,7 +410,8 @@ def run(
 	try:
 		# Keep asyncpg (db.py) on a single dedicated event loop/thread.
 		# init_db() creates the pool and (as designed in db.py) will create tables idempotently.
-		db.run(init_db(dsn))
+		# Use a small pool size to allow high parallelism of jobs (e.g. 20 jobs * 4 conn = 80 total).
+		db.run(init_db(dsn, min_size=1, max_size=4))
 		print(f"\033[92m[info] running workers: max_workers={MAX_WORKERS}\033[0m")
 
 		processed = 0
@@ -479,7 +480,7 @@ def run(
 def _build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="YouTube channel enrichment (yt-dlp, no analysis)")
 	p.add_argument("--limit-channels", type=int, default=None, help="Max channels to process (default: no limit)")
-	p.add_argument("--max-videos", type=int, default=70)
+	p.add_argument("--max-videos", type=int, default=40)
 	p.add_argument("--timeout-seconds", type=int, default=180)
 	p.add_argument(
 		"--dsn",
