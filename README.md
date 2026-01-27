@@ -1,7 +1,7 @@
 # YouTube Long Niche Scrapper
 
 Proyecto en Python para descubrir y rankear canales de YouTube “prometedores” dentro de un nicho de videos largos.
-
+**✨ Nuevo:** Ahora con soporte bilingüe (Inglés/Español) y filtros configurables de búsqueda.
 El pipeline (simplificado) es:
 
 1. **Discovery (Playwright)**: scrapea resultados de búsqueda de YouTube y guarda videos en Postgres.
@@ -54,8 +54,41 @@ python -m playwright install
 ### 4) Ejecutar pipeline
 
 **Discovery (scrape de búsqueda):**
+
+Básico (Español - por defecto):
 ```bash
 python yt_discovery.py --query "documental" --headless
+```
+
+Con idioma y filtros (Inglés):
+```bash
+python yt_discovery.py --query "documentary" --EN --upload-date this_month --duration over_20 --features hd subtitles --headless
+```
+
+Con idioma y filtros (Español):
+```bash
+python yt_discovery.py --query "documental" --ES --upload-date this_month --duration over_20 --headless
+```
+
+**Parallel Discovery (múltiples queries):**
+```bash
+# Español (usa queries.txt por defecto)
+python run_parallel_discovery.py --instances 5 --batch-size 10 --ES
+
+# Inglés (usa queries_en.txt por defecto)
+python run_parallel_discovery.py --instances 5 --batch-size 10 --EN --upload-date this_week --duration over_20
+```
+
+**Batch Discovery (secuencial con batches):**
+```bash
+# Español - procesar todas las queries
+python run_discovery.py --ES
+
+# Inglés - procesar batch específico con filtros
+python run_discovery.py --batch-size 50 --batch-index 0 --EN --duration over_20 --upload-date this_month
+
+# Verificar batches pendientes
+python run_discovery.py --batch-size 50 --check-batches --EN
 ```
 
 **Normalización/validación:**
@@ -83,8 +116,23 @@ python yt_channel_scoring.py
 streamlit run dashboard.py
 ```
 
+## Características Nuevas 🆕
+
+### Soporte Bilingüe
+- **`--EN`**: Interfaz en inglés (locale en-US, queries_en.txt)
+- **`--ES`**: Interfaz en español (locale es-MX, queries.txt) - **Por defecto**
+
+### Filtros de Búsqueda Configurables
+- **`--upload-date`**: `last_hour`, `today`, `this_week`, `this_month`, `this_year`
+- **`--duration`**: `under_4`, `4_20`, `over_20`
+- **`--features`**: `live`, `4k`, `hd`, `subtitles`, `creative_commons`, `360`, `vr180`, `3d`, `hdr`, `location`, `purchased`
+- **`--sort-by`**: `relevance`, `upload_date`, `view_count`, `rating`
+
+Ver [BILINGUAL_USAGE.md](BILINGUAL_USAGE.md) para guía completa de uso.
+
 ## Documentación
 
+- **[Uso Bilingüe y Filtros](BILINGUAL_USAGE.md)** ⭐ Nuevo
 - [Configuración y ejecución](docs/CONFIGURACION.md)
 - [Flujo del pipeline](docs/FLUJO.md)
 - [Base de datos (tablas)](docs/BASE_DE_DATOS.md)
@@ -94,3 +142,4 @@ streamlit run dashboard.py
 
 - El dashboard **no** ejecuta scraping ni recomputa métricas; solo lee `channels_score` + `channels_analysis`.
 - El módulo de base de datos centraliza el esquema y las operaciones asyncpg: ver [db.py](db.py).
+- Los parsers de normalización soportan automáticamente ambos idiomas (español e inglés).

@@ -22,7 +22,15 @@ async def get_already_run_queries() -> set[str]:
         print(f"{Fore.YELLOW}⚠️ Warning: Could not read query history ({e}). All queries will be considered new.{Style.RESET_ALL}")
         return set()
 
-async def worker(instance_id: int, queries: list[str]):
+async def worker(
+    instance_id: int,
+    queries: list[str],
+    lang: str = "es-MX",
+    upload_date: str | None = None,
+    duration: str | None = None,
+    features: list[str] | None = None,
+    sort_by: str | None = None
+):
     """
     Worker function that processes a list of queries sequentially.
     """
@@ -36,6 +44,23 @@ async def worker(instance_id: int, queries: list[str]):
             # Construct command
             # Using sys.executable to ensure we use the same Python environment
             cmd = [sys.executable, "yt_discovery.py", "--query", query, "--headless"]
+            
+            # Add language flag
+            if lang == "en-US":
+                cmd.append("--EN")
+            else:
+                cmd.append("--ES")
+            
+            # Add filter arguments if specified
+            if upload_date:
+                cmd.extend(["--upload-date", upload_date])
+            if duration:
+                cmd.extend(["--duration", duration])
+            if features:
+                cmd.append("--features")
+                cmd.extend(features)
+            if sort_by:
+                cmd.extend(["--sort-by", sort_by])
             
             # Execute subprocess asynchronously
             process = await asyncio.create_subprocess_exec(
@@ -66,11 +91,29 @@ async def main():
     parser = argparse.ArgumentParser(description="Run multiple instances of YouTube discovery in parallel.")
     parser.add_argument("--instances", type=int, required=True, help="Number of parallel instances (workers) to run.")
     parser.add_argument("--batch-size", type=int, required=True, help="Number of queries assigned to each instance.")
-    parser.add_argument("--queries-file", type=str, default="queries.txt", help="Path to the queries file.")
+    parser.add_argument("--queries-file", type=str, default=None, help="Path to the queries file. If not specified, auto-selects based on language.")
+    parser.add_argument("--reprocess-duplicates", action="store_true", help="Reprocess queries that have already been executed.")
+    
+    # Language selection
+    lang_group = parser.add_mutually_exclusive_group()
+    lang_group.add_argument("--EN", action="store_const", const="en-US", dest="lang", help="Use English (en-US) interface")
+    lang_group.add_argument("--ES", action="store_const", const="es-MX", dest="lang", help="Use Spanish (es-MX) interface (default)")
+    parser.set_defaults(lang="es-MX")
+    
+    # YouTube search filters
+    parser.add_argument("--upload-date", choices=["last_hour", "today", "this_week", "this_month", "this_year"], default=None, help="Filter by upload date")
+    parser.add_argument("--duration", choices=["under_4", "4_20", "over_20"], default=None, help="Filter by video duration")
+    parser.add_argument("--features", nargs="+", choices=["live", "4k", "hd", "subtitles", "creative_commons", "360", "vr180", "3d", "hdr", "location", "purchased"], default=None, help="Filter by video features")
+    parser.add_argument("--sort-by", choices=["relevance", "upload_date", "view_count", "rating"], default=None, help="Sort results by specific criteria")
     
     args = parser.parse_args()
+    
+    # Auto-select queries file based on language if not specified
+    if args.queries_file:
+        queries_file = Path(args.queries_file)
+    else:
+        queries_file = Path("queries_en.txt" if args.lang == "en-US" else "queries.txt")
 
-    queries_file = Path(args.queries_file)
     if not queries_file.exists():
         print(f"{Fore.RED}❌ Error: Query file '{queries_file}' not found.{Style.RESET_ALL}")
         return
@@ -84,12 +127,17 @@ async def main():
     print(f"Loaded {total_loaded} queries.")
 
     # 2. Filter executed
-    print("Checking database for executed queries...")
-    already_run = await get_already_run_queries()
-    
-    pending_queries = [q for q in all_queries if q not in already_run]
-    total_pending = len(pending_queries)
-    print(f"Pending queries: {total_pending} (Filtered {total_loaded - total_pending} executed)")
+    pending_queries = []
+    if args.reprocess_duplicates:
+        print("Reprocessing all queries (ignoring history).")
+        pending_queries = all_queries
+    else:
+        print("Checking database for executed queries...")
+        already_run = await get_already_run_queries()
+        
+        pending_queries = [q for q in all_queries if q not in already_run]
+        total_pending = len(pending_queries)
+        print(f"Pending queries: {total_pending} (Filtered {total_loaded - total_pending} executed)")
 
     if not pending_queries:
         print(f"{Fore.GREEN}No pending queries to process!{Style.RESET_ALL}")
@@ -122,7 +170,15 @@ async def main():
         batch = queries_to_process[start:end]
         
         if batch:
-            tasks.append(worker(i + 1, batch))
+            tasks.append(worker(
+                i + 1,
+                batch,
+                lang=args.lang,
+                upload_date=args.upload_date,
+                duration=args.duration,
+                features=args.features,
+                sort_by=args.sort_by
+            ))
         else:
             print(f"Instance {i + 1} has no queries assigned.")
 

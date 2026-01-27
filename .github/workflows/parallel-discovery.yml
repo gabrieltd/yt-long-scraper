@@ -8,6 +8,44 @@ on:
         required: true
         default: '10'
         type: string
+      language:
+        description: 'Language/Locale (EN for English, ES for Spanish)'
+        required: false
+        default: 'ES'
+        type: choice
+        options:
+          - 'EN'
+          - 'ES'
+      upload_date:
+        description: 'Filter by upload date'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'last_hour'
+          - 'today'
+          - 'this_week'
+          - 'this_month'
+          - 'this_year'
+      duration:
+        description: 'Filter by video duration'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'under_4'
+          - '4_20'
+          - 'over_20'
+      sort_by:
+        description: 'Sort results by'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'relevance'
+          - 'upload_date'
+          - 'view_count'
+          - 'rating'
 
 jobs:
   prepare-matrix:
@@ -30,9 +68,18 @@ jobs:
         run: |
           pip install -r requirements.txt
           
+          # Build command with language flag
+          CMD="python run_discovery.py --check-batches --batch-size ${{ inputs.batch_size }}"
+          
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+          
           # Use the python script to get exactly which batches have pending queries
           # This requires the DATABASE_URL to be present in this job's environment
-          python run_discovery.py --check-batches --batch-size ${{ inputs.batch_size }} > matrix.json
+          $CMD > matrix.json
           
           MATRIX_JSON=$(cat matrix.json)
           echo "Generated Matrix: $MATRIX_JSON"
@@ -64,4 +111,28 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          python run_discovery.py --batch-size ${{ inputs.batch_size }} --batch-index ${{ matrix.batch_index }}
+          # Build command with all parameters
+          CMD="python run_discovery.py --batch-size ${{ inputs.batch_size }} --batch-index ${{ matrix.batch_index }}"
+          
+          # Add language flag
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+          
+          # Add filters if specified
+          if [ -n "${{ inputs.upload_date }}" ]; then
+            CMD="$CMD --upload-date ${{ inputs.upload_date }}"
+          fi
+          
+          if [ -n "${{ inputs.duration }}" ]; then
+            CMD="$CMD --duration ${{ inputs.duration }}"
+          fi
+          
+          if [ -n "${{ inputs.sort_by }}" ]; then
+            CMD="$CMD --sort-by ${{ inputs.sort_by }}"
+          fi
+          
+          echo "Running: $CMD"
+          $CMD

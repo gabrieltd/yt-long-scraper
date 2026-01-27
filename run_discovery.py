@@ -28,10 +28,27 @@ def main():
     parser.add_argument("--batch-size", type=int, help="Number of queries per batch")
     parser.add_argument("--batch-index", type=int, help="Index of the batch to run (0-based)")
     parser.add_argument("--check-batches", action="store_true", help="Return JSON list of batch indices that have pending queries")
-    parser.add_argument("--queries-file", type=str, default="queries.txt", help="File containing queries to process (default: queries.txt)")
+    parser.add_argument("--queries-file", type=str, default=None, help="File containing queries to process. If not specified, auto-selects based on language.")
+    
+    # Language selection
+    lang_group = parser.add_mutually_exclusive_group()
+    lang_group.add_argument("--EN", action="store_const", const="en-US", dest="lang", help="Use English (en-US) interface")
+    lang_group.add_argument("--ES", action="store_const", const="es-MX", dest="lang", help="Use Spanish (es-MX) interface (default)")
+    parser.set_defaults(lang="es-MX")
+    
+    # YouTube search filters
+    parser.add_argument("--upload-date", choices=["last_hour", "today", "this_week", "this_month", "this_year"], default=None, help="Filter by upload date")
+    parser.add_argument("--duration", choices=["under_4", "4_20", "over_20"], default=None, help="Filter by video duration")
+    parser.add_argument("--features", nargs="+", choices=["live", "4k", "hd", "subtitles", "creative_commons", "360", "vr180", "3d", "hdr", "location", "purchased"], default=None, help="Filter by video features")
+    parser.add_argument("--sort-by", choices=["relevance", "upload_date", "view_count", "rating"], default=None, help="Sort results by specific criteria")
+    
     args = parser.parse_args()
-
-    queries_file = Path(args.queries_file)
+    
+    # Auto-select queries file based on language if not specified
+    if args.queries_file:
+        queries_file = Path(args.queries_file)
+    else:
+        queries_file = Path("queries_en.txt" if args.lang == "en-US" else "queries.txt")
     if not queries_file.exists():
         print(f"❌ Error: {queries_file} no encontrado.")
         return
@@ -111,6 +128,23 @@ def main():
             # Se asume que usa las opciones por defecto (headless=True, limit=None o lo que tenga el script)
             # Puedes agregar --limit 50 si quisieras forzar un límite
             cmd = [sys.executable, "yt_discovery.py", "--query", query, "--headless"]
+            
+            # Add language flag
+            if args.lang == "en-US":
+                cmd.append("--EN")
+            else:
+                cmd.append("--ES")
+            
+            # Add filter arguments if specified
+            if args.upload_date:
+                cmd.extend(["--upload-date", args.upload_date])
+            if args.duration:
+                cmd.extend(["--duration", args.duration])
+            if args.features:
+                cmd.append("--features")
+                cmd.extend(args.features)
+            if args.sort_by:
+                cmd.extend(["--sort-by", args.sort_by])
             
             subprocess.run(cmd, check=False) # check=False para que no se detenga si un script falla
             
