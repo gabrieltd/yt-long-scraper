@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--batch-index", type=int, help="Index of the batch to run (0-based)")
     parser.add_argument("--check-batches", action="store_true", help="Return JSON list of batch indices that have pending queries")
     parser.add_argument("--queries-file", type=str, default=None, help="File containing queries to process. If not specified, auto-selects based on language.")
+    parser.add_argument("--reprocess-duplicates", action="store_true", help="Reprocess queries that have already been executed")
     
     # Language selection
     lang_group = parser.add_mutually_exclusive_group()
@@ -77,8 +78,11 @@ def main():
             end = start + batch_size
             batch_queries = queries[start:min(end, total_queries)]
             
-            # If ANY query in this batch is not in already_run, we need this batch
-            if any(q for q in batch_queries if q not in already_run):
+            # If reprocess-duplicates is enabled, we need all batches
+            # Otherwise, only include batches with pending queries
+            if args.reprocess_duplicates:
+                needed_batches.append(i)
+            elif any(q for q in batch_queries if q not in already_run):
                 needed_batches.append(i)
         
         # Print ONLY the JSON list (no other text to stdout to avoid parsing issues)
@@ -105,7 +109,11 @@ def main():
     already_run = asyncio.run(get_already_run_queries())
     
     # 3. Filtrar
-    pending_queries = [q for q in queries if q not in already_run]
+    if args.reprocess_duplicates:
+        print("♻️ Modo reprocess: Se ejecutarán todas las queries (ignorando historial).")
+        pending_queries = queries
+    else:
+        pending_queries = [q for q in queries if q not in already_run]
     
     skipped_count = len(queries) - len(pending_queries)
     if skipped_count > 0:
