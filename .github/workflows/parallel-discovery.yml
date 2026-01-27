@@ -46,6 +46,11 @@ on:
           - 'upload_date'
           - 'view_count'
           - 'rating'
+      reprocess_duplicates:
+        description: 'Reprocess queries that have already been executed'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   prepare-matrix:
@@ -75,6 +80,11 @@ jobs:
             CMD="$CMD --EN"
           else
             CMD="$CMD --ES"
+          fi
+          
+          # Add reprocess-duplicates flag if enabled
+          if [ "${{ inputs.reprocess_duplicates }}" = "true" ]; then
+            CMD="$CMD --reprocess-duplicates"
           fi
           
           # Use the python script to get exactly which batches have pending queries
@@ -119,6 +129,11 @@ jobs:
             CMD="$CMD --EN"
           else
             CMD="$CMD --ES"
+          fi
+          
+          # Add reprocess-duplicates flag if enabled
+          if [ "${{ inputs.reprocess_duplicates }}" = "true" ]; then
+            CMD="$CMD --reprocess-duplicates"
           fi
           
           # Add filters if specified
