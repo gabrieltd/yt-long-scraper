@@ -30,8 +30,8 @@ LANG_CONFIG = {
                 "this_year": "This year"
             },
             "duration": {
-                "under_4": "Under 4 minutes",
-                "4_20": "4-20 minutes",
+                "under_4": "Under 3 minutes",
+                "4_20": "3 - 20 minutes",
                 "over_20": "Over 20 minutes"
             },
             "features": {
@@ -78,7 +78,7 @@ LANG_CONFIG = {
                 "this_year": "Este año"
             },
             "duration": {
-                "under_4": "Menos de 4 minutos",
+                "under_4": "Menos de 3 minutos",
                 "4_20": "De 3 a 20 minutos",
                 "over_20": "Más de 20 minutos"
             },
@@ -163,7 +163,6 @@ async def run(
 		
 			# Apply UI-driven filters based on user arguments
 			filters_button = config["ui"]["search_filters"]
-			
 			# Apply upload date filter if specified
 			if upload_date:
 				filter_text = config["filters"]["upload_date"].get(upload_date)
