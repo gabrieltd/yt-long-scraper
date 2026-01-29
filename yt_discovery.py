@@ -380,9 +380,11 @@ def main() -> None:
 			load_dotenv()
 			# Pass language to init_db for table naming (convert locale to simple lang code)
 			language = "en" if args.lang == "en-US" else "es"
-			await db.init_db(language=language)
-			search_run_id = await db.create_search_run(args.query, mode="exploration")
+			search_run_id = None
 			try:
+				await db.init_db(language=language)
+				search_run_id = await db.create_search_run(args.query, mode="exploration")
+				
 				results = await run(
 					args.query,
 					headless=headless,
@@ -401,10 +403,21 @@ def main() -> None:
 				if args.out:
 					args.out.parent.mkdir(parents=True, exist_ok=True)
 					args.out.write_text(payload, encoding="utf-8")
-					print(config["messages"]["results_written"].format(args.out))	
+					print(config["messages"]["results_written"].format(args.out))
+			except Exception as e:
+				print(f"⚠️ Error during execution: {e}")
+				raise
 			finally:
-				await db.finish_search_run(search_run_id)
-				await db.close_db()
+				# Safely close DB even if there were errors
+				try:
+					if search_run_id:
+						await db.finish_search_run(search_run_id)
+				except Exception as e:
+					print(f"⚠️ Error finishing search run: {e}")
+				try:
+					await db.close_db()
+				except Exception as e:
+					print(f"⚠️ Error closing database: {e}")
 
 		asyncio.run(_main_async())
 

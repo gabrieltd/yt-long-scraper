@@ -28,8 +28,18 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20,
         language: Language suffix for tables ('es' or 'en')
     """
     global _DB_POOL, _DB_LANGUAGE
+    
+    # Check if pool exists and is valid
     if _DB_POOL is not None:
-        return
+        # If language changed, close old pool and reinitialize
+        if _DB_LANGUAGE != language:
+            await close_db()
+        # If pool is closed or invalid, reinitialize
+        elif _DB_POOL._closing or _DB_POOL._closed:
+            _DB_POOL = None
+        else:
+            # Pool is valid and language matches, skip initialization
+            return
 
     dsn = dsn or os.getenv("DATABASE_URL")
     if not dsn:
@@ -40,11 +50,14 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20,
 
     # Create a connection pool with statement cache disabled for PgBouncer compatibility
     # Defaulting to min_size=1 usually saves resources in serverless/container envs.
+    # Increase timeout for connections (default is 60s)
     _DB_POOL = await asyncpg.create_pool(
         dsn, 
         min_size=min_size, 
         max_size=max_size, 
-        statement_cache_size=0
+        statement_cache_size=0,
+        timeout=120,  # Increase timeout to 120 seconds for slow connections
+        command_timeout=60  # Set command timeout
     )
     
     # Create language-specific tables
@@ -315,8 +328,12 @@ async def insert_videos_raw(search_run_id: uuid.UUID, videos: list[dict[str, Any
         # Let's try to be better: 
         # But executemany doesn't return count.
         # We'll just return len(tuples) as inserted (optimistic) and 0 ignored. 
-    except Exception as e:
+    except (asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionError) as e:
         print(f"Error inserting videos: {e}")
+        # Return 0 inserted, all ignored to avoid crash
+        return 0, len(tuples)
+    except Exception as e:
+        print(f"Unexpected error inserting videos: {e}")
         return 0, len(tuples)
 
     # Note: asyncpg executemany returns None.
