@@ -11,10 +11,10 @@ init(autoreset=True)
 
 import db  # Assuming db.py exists and handles async DB ops
 
-async def get_already_run_queries() -> set[str]:
+async def get_already_run_queries(language: str = "es") -> set[str]:
     """Retrieves already executed queries from the database."""
     try:
-        await db.init_db()
+        await db.init_db(language=language)
         executed = await db.get_executed_queries()
         await db.close_db()
         return executed
@@ -133,7 +133,9 @@ async def main():
         pending_queries = all_queries
     else:
         print("Checking database for executed queries...")
-        already_run = await get_already_run_queries()
+        # Convert locale to simple language code
+        language = "en" if args.lang == "en-US" else "es"
+        already_run = await get_already_run_queries(language)
         
         pending_queries = [q for q in all_queries if q not in already_run]
         total_pending = len(pending_queries)
@@ -146,6 +148,9 @@ async def main():
     # 3. Distribute work
     # User requirement: "si se seleccionan 50 queries y 10 instancias... total 500 queries"
     # This implies we take (instances * batch_size) queries from the top of Pending
+    
+    # Convert locale to simple language code for tracking
+    language = "en" if args.lang == "en-US" else "es"
     
     needed_total = args.instances * args.batch_size
     queries_to_process = pending_queries[:needed_total]

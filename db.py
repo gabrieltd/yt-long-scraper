@@ -11,21 +11,32 @@ from typing import Any
 import asyncpg
 
 _DB_POOL: asyncpg.Pool | None = None
+_DB_LANGUAGE: str = "es"  # Track the current language for table naming
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20) -> None:
-    """Initialize the PostgreSQL connection pool and schema."""
-    global _DB_POOL
+async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20, language: str = "es") -> None:
+    """Initialize the PostgreSQL connection pool and schema.
+    
+    Args:
+        dsn: Database connection string
+        min_size: Minimum pool size
+        max_size: Maximum pool size
+        language: Language suffix for tables ('es' or 'en')
+    """
+    global _DB_POOL, _DB_LANGUAGE
     if _DB_POOL is not None:
         return
 
     dsn = dsn or os.getenv("DATABASE_URL")
     if not dsn:
         raise RuntimeError("DATABASE_URL environment variable not set")
+
+    # Store language for table naming
+    _DB_LANGUAGE = language
 
     # Create a connection pool with statement cache disabled for PgBouncer compatibility
     # Defaulting to min_size=1 usually saves resources in serverless/container envs.
@@ -35,11 +46,24 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         max_size=max_size, 
         statement_cache_size=0
     )
+    
+    # Create language-specific tables
+    await create_tables(language)
 
-    async with _DB_POOL.acquire() as conn:
+
+async def create_tables(language: str = "es") -> None:
+    """Create language-specific database tables.
+    
+    Args:
+        language: Language suffix for tables ('es' or 'en')
+    """
+    pool = _require_pool()
+    lang_suffix = f"_{language}"
+    
+    async with pool.acquire() as conn:
         # Schema creation
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS search_runs (
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS search_runs{lang_suffix} (
                 id TEXT PRIMARY KEY,
                 query TEXT,
                 mode TEXT,
@@ -49,10 +73,10 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         """)
 
         # videos_raw
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS videos_raw (
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS videos_raw{lang_suffix} (
                 video_id TEXT PRIMARY KEY,
-                search_run_id TEXT REFERENCES search_runs(id),
+                search_run_id TEXT REFERENCES search_runs{lang_suffix}(id),
                 query TEXT,
                 video_url TEXT,
                 channel_url TEXT,
@@ -67,9 +91,9 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         """)
 
         # videos_normalized
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS videos_normalized (
-                video_id TEXT PRIMARY KEY REFERENCES videos_raw(video_id),
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS videos_normalized{lang_suffix} (
+                video_id TEXT PRIMARY KEY REFERENCES videos_raw{lang_suffix}(video_id),
                 channel_url TEXT,
                 query TEXT,
                 views_estimated BIGINT,
@@ -82,8 +106,8 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         """)
 
         # channels_raw
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS channels_raw (
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS channels_raw{lang_suffix} (
                 channel_url TEXT PRIMARY KEY,
                 channel_id TEXT,
                 channel_name TEXT,
@@ -94,8 +118,8 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         """)
 
         # channel_videos_raw
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS channel_videos_raw (
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS channel_videos_raw{lang_suffix} (
                 channel_url TEXT NOT NULL,
                 video_id TEXT NOT NULL,
                 upload_date TEXT,
@@ -106,8 +130,8 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         """)
 
         # channels_processed
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS channels_processed (
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS channels_processed{lang_suffix} (
                 channel_url TEXT PRIMARY KEY,
                 processed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 status TEXT DEFAULT 'success'
@@ -115,8 +139,8 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
         """)
 
         # channels_discovery_claims
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS channels_discovery_claims (
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS channels_discovery_claims{lang_suffix} (
                 channel_url TEXT PRIMARY KEY,
                 claimed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
@@ -124,31 +148,37 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20)
 
         # Indices
         indices = [
-            "CREATE INDEX IF NOT EXISTS idx_videos_raw_channel_url ON videos_raw (channel_url);",
-            "CREATE INDEX IF NOT EXISTS idx_videos_raw_discovered_at ON videos_raw (discovered_at);",
-            "CREATE INDEX IF NOT EXISTS idx_videos_raw_search_run_id ON videos_raw (search_run_id);",
-            "CREATE INDEX IF NOT EXISTS idx_videos_normalized_validation_passed ON videos_normalized (validation_passed);",
-            "CREATE INDEX IF NOT EXISTS idx_videos_normalized_normalized_at ON videos_normalized (normalized_at);",
-            "CREATE INDEX IF NOT EXISTS idx_channels_processed_processed_at ON channels_processed (processed_at);",
-            "CREATE INDEX IF NOT EXISTS idx_channel_videos_raw_channel_url ON channel_videos_raw (channel_url);",
-            "CREATE INDEX IF NOT EXISTS idx_channels_raw_extracted_at ON channels_raw (extracted_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_videos_raw{lang_suffix}_channel_url ON videos_raw{lang_suffix} (channel_url);",
+            f"CREATE INDEX IF NOT EXISTS idx_videos_raw{lang_suffix}_discovered_at ON videos_raw{lang_suffix} (discovered_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_videos_raw{lang_suffix}_search_run_id ON videos_raw{lang_suffix} (search_run_id);",
+            f"CREATE INDEX IF NOT EXISTS idx_videos_normalized{lang_suffix}_validation_passed ON videos_normalized{lang_suffix} (validation_passed);",
+            f"CREATE INDEX IF NOT EXISTS idx_videos_normalized{lang_suffix}_normalized_at ON videos_normalized{lang_suffix} (normalized_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_processed{lang_suffix}_processed_at ON channels_processed{lang_suffix} (processed_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_channel_videos_raw{lang_suffix}_channel_url ON channel_videos_raw{lang_suffix} (channel_url);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_extracted_at ON channels_raw{lang_suffix} (extracted_at);",
         ]
         for idx in indices:
             await conn.execute(idx)
 
 
 async def close_db() -> None:
-    global _DB_POOL
+    global _DB_POOL, _DB_LANGUAGE
     if _DB_POOL is None:
         return
     await _DB_POOL.close()
     _DB_POOL = None
+    _DB_LANGUAGE = "es"
 
 
 def _require_pool() -> asyncpg.Pool:
     if _DB_POOL is None:
         raise RuntimeError("DB not initialized. Call init_db() first.")
     return _DB_POOL
+
+
+def _get_table_name(base_name: str) -> str:
+    """Get language-specific table name."""
+    return f"{base_name}_{_DB_LANGUAGE}"
 
 
 # Helper to handle datetime types for asyncpg (it expects datetime objects, not strings)
@@ -173,8 +203,9 @@ async def create_search_run(query: str, mode: str = "exploration") -> uuid.UUID:
     pool = _require_pool()
     run_id = uuid.uuid4()
     started_at = _utcnow()
+    table_name = _get_table_name("search_runs")
     await pool.execute(
-        "INSERT INTO search_runs (id, query, mode, started_at) VALUES ($1, $2, $3, $4)",
+        f"INSERT INTO {table_name} (id, query, mode, started_at) VALUES ($1, $2, $3, $4)",
         str(run_id), query, mode, started_at
     )
     return run_id
@@ -184,8 +215,9 @@ async def finish_search_run(search_run_id: uuid.UUID) -> None:
     """Mark a search run as finished."""
     pool = _require_pool()
     finished_at = _utcnow()
+    table_name = _get_table_name("search_runs")
     await pool.execute(
-        "UPDATE search_runs SET finished_at = $1 WHERE id = $2",
+        f"UPDATE {table_name} SET finished_at = $1 WHERE id = $2",
         finished_at, str(search_run_id)
     )
 
@@ -193,7 +225,8 @@ async def finish_search_run(search_run_id: uuid.UUID) -> None:
 async def get_executed_queries() -> set[str]:
     """Return a set of distinct queries that have been logged in search_runs."""
     pool = _require_pool()
-    rows = await pool.fetch("SELECT DISTINCT query FROM search_runs")
+    table_name = _get_table_name("search_runs")
+    rows = await pool.fetch(f"SELECT DISTINCT query FROM {table_name}")
     return {row["query"] for row in rows if row["query"]}
 
 
@@ -253,8 +286,9 @@ async def insert_videos_raw(search_run_id: uuid.UUID, videos: list[dict[str, Any
     # Efficient strategy: Use COPY or unnest. For simplicity here, use executemany and accept approximate count
     # or just execute.
     # Actually, proper way with asyncpg to ignore duplicates is:
-    query = """
-        INSERT INTO videos_raw (
+    table_name = _get_table_name("videos_raw")
+    query = f"""
+        INSERT INTO {table_name} (
             video_id, search_run_id, query, video_url, channel_url, 
             duration_text, views_text, published_text, thumbnail_url, 
             video_type, is_multi_creator
@@ -292,10 +326,12 @@ async def insert_videos_raw(search_run_id: uuid.UUID, videos: list[dict[str, Any
 async def fetch_unprocessed_videos_raw(limit: int | None = None) -> list[dict[str, Any]]:
     """Fetch raw videos that have not yet been normalized."""
     pool = _require_pool()
-    sql = """
+    videos_raw_table = _get_table_name("videos_raw")
+    videos_normalized_table = _get_table_name("videos_normalized")
+    sql = f"""
         SELECT r.video_id, r.channel_url, r.query, r.duration_text, r.views_text, r.published_text
-        FROM videos_raw r
-        LEFT JOIN videos_normalized n ON n.video_id = r.video_id
+        FROM {videos_raw_table} r
+        LEFT JOIN {videos_normalized_table} n ON n.video_id = r.video_id
         WHERE n.video_id IS NULL
         ORDER BY r.discovered_at ASC
     """
@@ -337,8 +373,9 @@ async def insert_videos_normalized(rows: list[dict[str, Any]]) -> tuple[int, int
     if not tuples:
         return (0, 0)
     
-    query = """
-        INSERT INTO videos_normalized (
+    table_name = _get_table_name("videos_normalized")
+    query = f"""
+        INSERT INTO {table_name} (
             video_id, channel_url, query, views_estimated, published_at_estimated,
             duration_seconds_estimated, validation_passed, validation_reason, normalized_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -360,12 +397,16 @@ async def claim_channels_for_discovery(limit: int) -> list[str]:
     # To be atomic, we can do a CTE based update or simply lock.
     # Or just select and try insertion.
     
+    videos_normalized_table = _get_table_name("videos_normalized")
+    channels_processed_table = _get_table_name("channels_processed")
+    channels_claims_table = _get_table_name("channels_discovery_claims")
+    
     # 1. Select candidates
-    select_sql = """
+    select_sql = f"""
         SELECT n.channel_url
-        FROM videos_normalized n
-        LEFT JOIN channels_processed p ON p.channel_url = n.channel_url
-        LEFT JOIN channels_discovery_claims c ON c.channel_url = n.channel_url
+        FROM {videos_normalized_table} n
+        LEFT JOIN {channels_processed_table} p ON p.channel_url = n.channel_url
+        LEFT JOIN {channels_claims_table} c ON c.channel_url = n.channel_url
         WHERE n.validation_passed = TRUE
           AND n.channel_url IS NOT NULL 
           AND n.channel_url <> ''
@@ -388,7 +429,7 @@ async def claim_channels_for_discovery(limit: int) -> list[str]:
             
             # Using ON CONFLICT DO NOTHING to handle races if multiple workers pick same
             await conn.executemany(
-                "INSERT INTO channels_discovery_claims (channel_url, claimed_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                f"INSERT INTO {channels_claims_table} (channel_url, claimed_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                 claim_tuples
             )
             
@@ -405,14 +446,15 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
     if not url:
         raise ValueError("channel_url is required")
 
-    await pool.execute("""
-        INSERT INTO channels_raw (channel_url, channel_id, channel_name, subscriber_count, is_verified, extracted_at)
+    table_name = _get_table_name("channels_raw")
+    await pool.execute(f"""
+        INSERT INTO {table_name} (channel_url, channel_id, channel_name, subscriber_count, is_verified, extracted_at)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT(channel_url) DO UPDATE SET
-            channel_id=COALESCE(EXCLUDED.channel_id, channels_raw.channel_id),
-            channel_name=COALESCE(EXCLUDED.channel_name, channels_raw.channel_name),
-            subscriber_count=COALESCE(EXCLUDED.subscriber_count, channels_raw.subscriber_count),
-            is_verified=COALESCE(EXCLUDED.is_verified, channels_raw.is_verified),
+            channel_id=COALESCE(EXCLUDED.channel_id, {table_name}.channel_id),
+            channel_name=COALESCE(EXCLUDED.channel_name, {table_name}.channel_name),
+            subscriber_count=COALESCE(EXCLUDED.subscriber_count, {table_name}.subscriber_count),
+            is_verified=COALESCE(EXCLUDED.is_verified, {table_name}.is_verified),
             extracted_at=EXCLUDED.extracted_at
     """, 
         url,
@@ -451,13 +493,14 @@ async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any
     if not tuples:
         return (0, 0)
 
-    await pool.executemany("""
-        INSERT INTO channel_videos_raw (channel_url, video_id, upload_date, duration_seconds, view_count)
+    table_name = _get_table_name("channel_videos_raw")
+    await pool.executemany(f"""
+        INSERT INTO {table_name} (channel_url, video_id, upload_date, duration_seconds, view_count)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT(channel_url, video_id) DO UPDATE SET
-            upload_date=COALESCE(EXCLUDED.upload_date, channel_videos_raw.upload_date),
-            duration_seconds=COALESCE(EXCLUDED.duration_seconds, channel_videos_raw.duration_seconds),
-            view_count=COALESCE(EXCLUDED.view_count, channel_videos_raw.view_count)
+            upload_date=COALESCE(EXCLUDED.upload_date, {table_name}.upload_date),
+            duration_seconds=COALESCE(EXCLUDED.duration_seconds, {table_name}.duration_seconds),
+            view_count=COALESCE(EXCLUDED.view_count, {table_name}.view_count)
     """, tuples)
     
     return len(tuples), 0
@@ -468,8 +511,9 @@ async def mark_channel_processed(channel_url: str, *, processed_at: datetime | N
     pool = _require_pool()
     p_at = _ensure_datetime(processed_at) or _utcnow()
 
-    await pool.execute("""
-        INSERT INTO channels_processed (channel_url, processed_at, status)
+    table_name = _get_table_name("channels_processed")
+    await pool.execute(f"""
+        INSERT INTO {table_name} (channel_url, processed_at, status)
         VALUES ($1, $2, $3)
         ON CONFLICT(channel_url) DO UPDATE SET
             processed_at=EXCLUDED.processed_at,
@@ -482,5 +526,6 @@ async def is_channel_processed(channel_url: str) -> bool:
     if not channel_url:
         return False
     pool = _require_pool()
-    row = await pool.fetchrow("SELECT 1 FROM channels_processed WHERE channel_url = $1", channel_url)
+    table_name = _get_table_name("channels_processed")
+    row = await pool.fetchrow(f"SELECT 1 FROM {table_name} WHERE channel_url = $1", channel_url)
     return row is not None

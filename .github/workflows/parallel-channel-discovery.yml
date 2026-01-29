@@ -13,6 +13,14 @@ on:
         required: true
         default: '5'
         type: string
+      language:
+        description: 'Language/Locale (EN for English, ES for Spanish)'
+        required: false
+        default: 'ES'
+        type: choice
+        options:
+          - 'EN'
+          - 'ES'
 
 jobs:
   prepare-matrix:
@@ -67,4 +75,13 @@ jobs:
           echo "Starting Job ${{ matrix.job_index }} processing ${{ inputs.channels_per_job }} channels"
           # The script uses DB claiming, so multiple jobs will automatically pick different channels.
           # We pass limit-channels to control batch size per job.
-          python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }}
+          CMD="python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }}"
+          
+          # Add language flag
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+          
+          $CMD

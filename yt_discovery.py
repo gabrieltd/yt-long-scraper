@@ -378,7 +378,9 @@ def main() -> None:
 		async def _main_async() -> None:
 			# DB lifecycle is intentionally handled via db.py (no SQL here).
 			load_dotenv()
-			await db.init_db()
+			# Pass language to init_db for table naming (convert locale to simple lang code)
+			language = "en" if args.lang == "en-US" else "es"
+			await db.init_db(language=language)
 			search_run_id = await db.create_search_run(args.query, mode="exploration")
 			try:
 				results = await run(

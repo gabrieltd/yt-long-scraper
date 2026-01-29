@@ -9,9 +9,9 @@ from pathlib import Path
 import db
 from dotenv import load_dotenv
 
-async def get_already_run_queries() -> set[str]:
+async def get_already_run_queries(language: str = "es") -> set[str]:
     try:
-        await db.init_db()
+        await db.init_db(language=language)
         executed = await db.get_executed_queries()
         await db.close_db()
         return executed
@@ -67,7 +67,9 @@ def main():
             print("To check batches, you must provide --batch-size.")
             sys.exit(1)
 
-        already_run = asyncio.run(get_already_run_queries())
+        # Convert locale to simple language code
+        language = "en" if args.lang == "en-US" else "es"
+        already_run = asyncio.run(get_already_run_queries(language))
         batch_size = args.batch_size
         needed_batches = []
         
@@ -106,7 +108,9 @@ def main():
 
     # 2. Obtener queries ya ejecutadas
     print("🔎 Verificando historial de queries ejecutadas...")
-    already_run = asyncio.run(get_already_run_queries())
+    # Convert locale to simple language code
+    language = "en" if args.lang == "en-US" else "es"
+    already_run = asyncio.run(get_already_run_queries(language))
     
     # 3. Filtrar
     if args.reprocess_duplicates:

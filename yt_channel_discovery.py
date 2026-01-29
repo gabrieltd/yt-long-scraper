@@ -397,6 +397,7 @@ def run(
 	max_videos: int = 50,
 	dsn: str | None = None,
 	timeout_seconds: int = 180,
+	language: str = "es",
 ) -> None:
 	"""Main orchestration: fetch candidates -> process in parallel workers.
 
@@ -411,7 +412,7 @@ def run(
 		# Keep asyncpg (db.py) on a single dedicated event loop/thread.
 		# init_db() creates the pool and (as designed in db.py) will create tables idempotently.
 		# Use a small pool size to allow high parallelism of jobs (e.g. 20 jobs * 4 conn = 80 total).
-		db.run(init_db(dsn, min_size=1, max_size=4))
+		db.run(init_db(dsn, min_size=1, max_size=4, language=language))
 		print(f"\033[92m[info] running workers: max_workers={MAX_WORKERS}\033[0m")
 
 		processed = 0
@@ -488,6 +489,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 		default=None,
 		help="Optional PostgreSQL DSN override (otherwise uses DATABASE_URL/POSTGRES_DSN)",
 	)
+	# Language selection
+	lang_group = p.add_mutually_exclusive_group()
+	lang_group.add_argument("--EN", action="store_const", const="en", dest="lang", help="Use English tables")
+	lang_group.add_argument("--ES", action="store_const", const="es", dest="lang", help="Use Spanish tables (default)")
+	p.set_defaults(lang="es")
 	return p
 
 
@@ -501,4 +507,5 @@ if __name__ == "__main__":
 		max_videos=args.max_videos,
 		dsn=args.dsn,
 		timeout_seconds=args.timeout_seconds,
+		language=args.lang,
 	)
