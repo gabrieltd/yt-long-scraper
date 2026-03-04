@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Channel Relevance – YouTube Niche Scrapper</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+<div class="app-container">
+
+    <!-- ── Header ─────────────────────────────────────────────────── -->
+    <header>
+        <h1>📊 Channel Relevance Tracker</h1>
+        <div class="lang-toggle">
+            <button data-lang="es" class="active">🇪🇸 ES</button>
+            <button data-lang="en">🇺🇸 EN</button>
+        </div>
+    </header>
+
+    <!-- ── Stats Bar ──────────────────────────────────────────────── -->
+    <div class="stats-bar" id="statsBar">
+        <div class="stat-badge blue">
+            <div class="value" id="statTotal">-</div>
+            <div class="label">Total Channels</div>
+        </div>
+        <div class="stat-badge green">
+            <div class="value" id="statRelevant">-</div>
+            <div class="label">Relevant</div>
+        </div>
+        <div class="stat-badge red">
+            <div class="value" id="statNotRelevant">-</div>
+            <div class="label">Not Relevant</div>
+        </div>
+        <div class="stat-badge orange">
+            <div class="value" id="statUnmarked">-</div>
+            <div class="label">Unmarked</div>
+        </div>
+    </div>
+
+    <!-- ── Filter Panel ───────────────────────────────────────────── -->
+    <details class="filter-panel" open>
+        <summary>Filters</summary>
+        <div class="filter-grid">
+            <div class="filter-group">
+                <label>Hit: Min Views</label>
+                <input type="number" id="fMinViewsIndividual" value="10000" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Hit: Max Views</label>
+                <input type="number" id="fMaxViewsIndividual" placeholder="No limit" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Min Total Videos</label>
+                <input type="number" id="fMinVideosTotal" value="3" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Max Total Videos</label>
+                <input type="number" id="fMaxVideosTotal" placeholder="No limit" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Min Hit Videos</label>
+                <input type="number" id="fMinHitsCount" value="1" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Min Avg Views</label>
+                <input type="number" id="fMinAvgViews" value="5000" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Min Subscribers</label>
+                <input type="number" id="fMinSubscribers" placeholder="No limit" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Max Subscribers</label>
+                <input type="number" id="fMaxSubscribers" placeholder="No limit" min="0" />
+            </div>
+            <div class="filter-group">
+                <label>Verified Only</label>
+                <select id="fIsVerified">
+                    <option value="">Any</option>
+                    <option value="true">Verified</option>
+                    <option value="false">Not Verified</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Channel Name</label>
+                <input type="text" id="fChannelName" placeholder="Search..." />
+            </div>
+            <div class="filter-group">
+                <label>Relevance</label>
+                <select id="fRelevance">
+                    <option value="all">All</option>
+                    <option value="unmarked">Unmarked</option>
+                    <option value="relevant">Relevant</option>
+                    <option value="not_relevant">Not Relevant</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Tag Filter</label>
+                <input type="text" id="fTagFilter" placeholder="e.g. niche_fit" />
+            </div>
+        </div>
+        <div class="filter-actions">
+            <button class="btn btn-primary" id="btnApply">Apply Filters</button>
+            <button class="btn btn-secondary" id="btnReset">Reset</button>
+        </div>
+    </details>
+
+    <!-- ── Data Table ─────────────────────────────────────────────── -->
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th data-sort="channel_name">Channel <span class="sort-arrow"></span></th>
+                    <th data-sort="subscriber_count">Subscribers <span class="sort-arrow"></span></th>
+                    <th data-sort="total_videos_tracked">Videos <span class="sort-arrow"></span></th>
+                    <th data-sort="hit_videos_count">Hits <span class="sort-arrow"></span></th>
+                    <th data-sort="avg_views_on_channel">Avg Views <span class="sort-arrow"></span></th>
+                    <th data-sort="max_views_on_channel">Max Views <span class="sort-arrow"></span></th>
+                    <th data-sort="is_relevant">Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="channelTableBody">
+                <tr><td colspan="8" class="loading"><div class="spinner"></div></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ── Pagination ─────────────────────────────────────────────── -->
+    <div class="pagination" id="pagination">
+        <button id="btnPrev" disabled>&laquo; Prev</button>
+        <span class="page-info" id="pageInfo">Page 1 of 1</span>
+        <button id="btnNext" disabled>Next &raquo;</button>
+    </div>
+</div>
+
+<!-- ── Notes/Tags Modal ───────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+        <h3 id="modalTitle">Edit Channel Details</h3>
+        <div class="form-group">
+            <label>Notes</label>
+            <textarea id="modalNotes" placeholder="Add notes about this channel..."></textarea>
+        </div>
+        <div class="form-group">
+            <label>Tags <span style="color:var(--text-dim);font-weight:400">(press Enter to add)</span></label>
+            <div class="tags-input-wrapper" id="tagsWrapper">
+                <input type="text" class="tags-input" id="tagInput" placeholder="Add tag..." />
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" id="btnModalCancel">Cancel</button>
+            <button class="btn btn-primary" id="btnModalSave">Save</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

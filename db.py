@@ -159,8 +159,20 @@ async def create_tables(language: str = "es") -> None:
             );
         """)
 
+        # channel_relevance — tracks whether a channel is relevant, with notes and tags
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS channel_relevance{lang_suffix} (
+                channel_url TEXT PRIMARY KEY,
+                is_relevant BOOLEAN,
+                notes TEXT,
+                tags TEXT[],
+                marked_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # Indices
         indices = [
+            f"CREATE INDEX IF NOT EXISTS idx_channel_relevance{lang_suffix}_is_relevant ON channel_relevance{lang_suffix} (is_relevant);",
             f"CREATE INDEX IF NOT EXISTS idx_videos_raw{lang_suffix}_channel_url ON videos_raw{lang_suffix} (channel_url);",
             f"CREATE INDEX IF NOT EXISTS idx_videos_raw{lang_suffix}_discovered_at ON videos_raw{lang_suffix} (discovered_at);",
             f"CREATE INDEX IF NOT EXISTS idx_videos_raw{lang_suffix}_search_run_id ON videos_raw{lang_suffix} (search_run_id);",
