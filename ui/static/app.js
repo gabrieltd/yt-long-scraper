@@ -85,6 +85,12 @@ function getFilterParams() {
     const beforeVal = $("#fLastUploadedBefore").value;
     if (beforeVal) p.set("last_uploaded_before", beforeVal.replace(/-/g, ""));
 
+    // First upload date filters
+    const firstAfterVal = $("#fFirstUploadedAfter").value;
+    if (firstAfterVal) p.set("first_uploaded_after", firstAfterVal.replace(/-/g, ""));
+    const firstBeforeVal = $("#fFirstUploadedBefore").value;
+    if (firstBeforeVal) p.set("first_uploaded_before", firstBeforeVal.replace(/-/g, ""));
+
     const verified = $("#fIsVerified").value;
     if (verified !== "") p.set("is_verified", verified);
 
@@ -96,7 +102,7 @@ function getFilterParams() {
 
 // ── Fetch Channels ─────────────────────────────────────────────────────────
 async function fetchChannels() {
-    tbody.innerHTML = `<tr><td colspan="9" class="loading"><div class="spinner"></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="loading"><div class="spinner"></div></td></tr>`;
 
     const params = getFilterParams();
     try {
@@ -110,7 +116,7 @@ async function fetchChannels() {
         renderTable();
         renderPagination();
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="9" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
         console.error(err);
     }
 }
@@ -132,7 +138,7 @@ async function fetchStats() {
 // ── Render Table ───────────────────────────────────────────────────────────
 function renderTable() {
     if (state.channels.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="9" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
         return;
     }
 
@@ -161,6 +167,7 @@ function renderTable() {
             <td class="num">${fmtAvg(ch.avg_views_on_channel)}</td>
             <td class="num">${fmt(ch.max_views_on_channel)}</td>
             <td class="num date-cell">${fmtDate(ch.last_upload_date)}</td>
+            <td class="num date-cell">${fmtDate(ch.first_upload_date)}</td>
             <td><span class="relevance-badge ${relClass}">${relLabel}</span>${tagsHtml}</td>
             <td>
                 <div class="action-btns">
@@ -315,6 +322,8 @@ btnReset.addEventListener("click", () => {
     $("#fMaxSubscribers").value = "";
     $("#fLastUploadedAfter").value = "";
     $("#fLastUploadedBefore").value = "";
+    $("#fFirstUploadedAfter").value = "";
+    $("#fFirstUploadedBefore").value = "";
     $("#fIsVerified").value = "";
     $("#fChannelName").value = "";
     $("#fRelevance").value = "all";

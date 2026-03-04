@@ -158,13 +158,16 @@ def main():
             if args.sort_by:
                 cmd.extend(["--sort-by", args.sort_by])
             
-            subprocess.run(cmd, check=False) # check=False para que no se detenga si un script falla
+            # 10 min timeout per query to prevent stuck jobs
+            subprocess.run(cmd, check=False, timeout=600)
             
             print(f"✅ Query '{query}' finalizada.")
             
             # Pequeña pausa entre ejecuciones para dar respiro
             time.sleep(2)
             
+        except subprocess.TimeoutExpired:
+            print(f"⚠️ Query '{query}' timed out after 10 min — skipping to next query.")
         except KeyboardInterrupt:
             print("\n🛑 Ejecución detenida por el usuario.")
             sys.exit(0)

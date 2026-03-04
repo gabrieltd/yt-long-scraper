@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Channel Relevance – YouTube Niche Scrapper</title>
     <link rel="stylesheet" href="/static/style.css" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap" rel="stylesheet" />
 </head>
 <body>
 <div class="app-container">
 
-    <!-- ── Header ─────────────────────────────────────────────────── -->
+    <!-- ── Header ─────────────────────────────────────────────────────────────── -->
     <header>
-        <h1>📊 Channel Relevance Tracker</h1>
+        <h1>Channel <span>Relevance</span> Tracker</h1>
         <div class="header-controls">
             <button class="btn btn-secondary btn-icon" id="btnToggleSidebar" title="Toggle sticky sidebar">
                 📌 Sidebar
@@ -24,7 +24,7 @@
         </div>
     </header>
 
-    <!-- ── Stats Bar ──────────────────────────────────────────────── -->
+    <!-- ── Stats Bar ──────────────────────────────────────────────────────────── -->
     <div class="stats-bar" id="statsBar">
         <div class="stat-badge blue">
             <div class="value" id="statTotal">-</div>
@@ -92,6 +92,14 @@
                 <input type="date" id="fLastUploadedBefore" />
             </div>
             <div class="filter-group">
+                <label>First Upload After</label>
+                <input type="date" id="fFirstUploadedAfter" />
+            </div>
+            <div class="filter-group">
+                <label>First Upload Before</label>
+                <input type="date" id="fFirstUploadedBefore" />
+            </div>
+            <div class="filter-group">
                 <label>Verified Only</label>
                 <select id="fIsVerified">
                     <option value="">Any</option>
@@ -138,12 +146,13 @@
                     <th data-sort="avg_views_on_channel">Avg Views <span class="sort-arrow"></span></th>
                     <th data-sort="max_views_on_channel">Max Views <span class="sort-arrow"></span></th>
                     <th data-sort="last_upload_date">Last Upload <span class="sort-arrow"></span></th>
+                    <th data-sort="first_upload_date">First Upload <span class="sort-arrow"></span></th>
                     <th data-sort="is_relevant">Status</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody id="channelTableBody">
-                <tr><td colspan="9" class="loading"><div class="spinner"></div></td></tr>
+                <tr><td colspan="10" class="loading"><div class="spinner"></div></td></tr>
             </tbody>
         </table>
     </div>
@@ -168,7 +177,7 @@
             <textarea id="modalNotes" placeholder="Add notes about this channel..."></textarea>
         </div>
         <div class="form-group">
-            <label>Tags <span style="color:var(--text-dim);font-weight:400">(press Enter to add)</span></label>
+            <label>Tags <span style="color:var(--muted);font-weight:400">(press Enter to add)</span></label>
             <div class="tags-input-wrapper" id="tagsWrapper">
                 <input type="text" class="tags-input" id="tagInput" placeholder="Add tag..." />
             </div>

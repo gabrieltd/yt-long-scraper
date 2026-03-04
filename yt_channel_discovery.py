@@ -196,6 +196,13 @@ def fetch_rss_dates(
 	latest_date: str | None = None
 
 	for entry in root.findall(f"{_RSS_ATOM_NS}entry"):
+		# Skip YouTube Shorts: their <link> href contains /shorts/
+		link_el = entry.find(f"{_RSS_ATOM_NS}link")
+		if link_el is not None:
+			href = link_el.get("href", "")
+			if "/shorts/" in href:
+				continue
+
 		# Extract video ID from <yt:videoId>VIDEO_ID</yt:videoId>
 		vid_el = entry.find(f"{_RSS_YT_NS}videoId")
 		pub_el = entry.find(f"{_RSS_ATOM_NS}published")
@@ -299,6 +306,7 @@ def parse_channel_raw(
 	dump: dict[str, Any],
 	*,
 	last_upload_date: str | None = None,
+	first_upload_date: str | None = None,
 ) -> dict[str, Any]:
 	"""Extract raw channel metadata from a yt-dlp dump.
 
@@ -327,6 +335,7 @@ Missing fields are left as None.
 		"subscriber_count": subscriber_count,
 		"is_verified": is_verified,
 		"last_upload_date": last_upload_date,
+		"first_upload_date": first_upload_date,
 		"extracted_at": _utcnow(),
 	}
 
@@ -472,6 +481,21 @@ Returns:
 
 			# Store last_upload_date on the channel row.
 			channel_row["last_upload_date"] = last_upload_date
+
+		# 3b) Derive first_upload_date from the oldest non-Short video.
+		#     Shorts typically have duration <= 60s.
+		oldest_date: str | None = None
+		for vrow in video_rows:
+			vdate = vrow.get("upload_date")
+			if not vdate:
+				continue
+			dur = vrow.get("duration_seconds")
+			# Skip Shorts (duration <= 60s) when available
+			if dur is not None and dur <= 60:
+				continue
+			if oldest_date is None or vdate < oldest_date:
+				oldest_date = vdate
+		channel_row["first_upload_date"] = oldest_date
 
 		# 4) Persist raw data via db.py (async), executed on the DB loop thread.
 		db.run(upsert_channel_raw(channel_row))

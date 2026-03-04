@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import unquote
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -57,6 +56,8 @@ async def api_channels(
     tag_filter: str | None = Query(None),
     last_uploaded_after: str | None = Query(None),
     last_uploaded_before: str | None = Query(None),
+    first_uploaded_after: str | None = Query(None),
+    first_uploaded_before: str | None = Query(None),
     sort_by: str = Query("hit_videos_count"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -78,6 +79,8 @@ async def api_channels(
         tag_filter=tag_filter,
         last_uploaded_after=last_uploaded_after,
         last_uploaded_before=last_uploaded_before,
+        first_uploaded_after=first_uploaded_after,
+        first_uploaded_before=first_uploaded_before,
         sort_by=sort_by,
         sort_order=sort_order,
         page=page,
@@ -95,10 +98,9 @@ class RelevanceBody(BaseModel):
 
 @app.patch("/api/channels/{channel_url:path}/relevance")
 async def api_set_relevance(channel_url: str, body: RelevanceBody):
-    decoded_url = unquote(channel_url)
     await set_channel_relevance(
         body.lang,
-        decoded_url,
+        channel_url,
         is_relevant=body.is_relevant,
         notes=body.notes,
         tags=body.tags,

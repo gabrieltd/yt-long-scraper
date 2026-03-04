@@ -22,6 +22,7 @@ VALID_SORT_COLUMNS = {
     "max_views_on_channel",
     "is_relevant",
     "last_upload_date",
+    "first_upload_date",
 }
 
 
@@ -81,6 +82,8 @@ async def get_filtered_channels(
     tag_filter: str | None = None,
     last_uploaded_after: str | None = None,   # YYYYMMDD
     last_uploaded_before: str | None = None,  # YYYYMMDD
+    first_uploaded_after: str | None = None,  # YYYYMMDD
+    first_uploaded_before: str | None = None, # YYYYMMDD
     sort_by: str = "hit_videos_count",
     sort_order: str = "desc",
     page: int = 1,
@@ -185,6 +188,14 @@ async def get_filtered_channels(
         p = _next(); params.append(last_uploaded_before)
         where_clauses.append(f"cr.last_upload_date <= {p}")
 
+    # first_upload_date filters (YYYYMMDD string comparison)
+    if first_uploaded_after:
+        p = _next(); params.append(first_uploaded_after)
+        where_clauses.append(f"cr.first_upload_date >= {p}")
+    if first_uploaded_before:
+        p = _next(); params.append(first_uploaded_before)
+        where_clauses.append(f"cr.first_upload_date <= {p}")
+
     where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
     # ── Pagination ──
@@ -207,6 +218,7 @@ async def get_filtered_channels(
             cr.subscriber_count,
             cr.is_verified,
             cr.last_upload_date,
+            cr.first_upload_date,
             stats.total_videos_tracked,
             stats.hit_videos_count,
             stats.avg_views_on_channel,
@@ -236,6 +248,7 @@ async def get_filtered_channels(
             "subscriber_count": r["subscriber_count"],
             "is_verified": r["is_verified"],
             "last_upload_date": r["last_upload_date"],
+            "first_upload_date": r["first_upload_date"],
             "total_videos_tracked": r["total_videos_tracked"],
             "hit_videos_count": r["hit_videos_count"],
             "avg_views_on_channel": float(r["avg_views_on_channel"]) if r["avg_views_on_channel"] is not None else 0,

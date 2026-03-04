@@ -197,7 +197,14 @@ async def run(
 					await page.wait_for_timeout(800)
 
 			# Scroll to bottom until 'No more results' message is found
+			# Safety: max scroll time (5 min) and stale detection (no new videos after N scrolls)
 			no_more_msg = config["ui"]["no_more_results"]
+			_scroll_start = asyncio.get_event_loop().time()
+			_MAX_SCROLL_SECONDS = 300  # 5 minutes
+			_prev_count = 0
+			_stale_scrolls = 0
+			_MAX_STALE = 5  # break after 5 consecutive scrolls with no new videos
+
 			while True:
 				# Scroll down by evaluating scroll on the ytd-app element
 				await page.evaluate("document.querySelector('ytd-app').scrollIntoView({block: 'end', behavior: 'smooth'});")
@@ -210,6 +217,23 @@ async def run(
 				).count()
 				if no_more_results > 0:
 					break
+
+				# Timeout: break if scrolling for too long
+				elapsed = asyncio.get_event_loop().time() - _scroll_start
+				if elapsed >= _MAX_SCROLL_SECONDS:
+					print(f"⚠️ Scroll timeout after {int(elapsed)}s — collecting results found so far.")
+					break
+
+				# Stale detection: if no new videos loaded after several scrolls, stop
+				cur_count = await page.locator("ytd-video-renderer").count()
+				if cur_count <= _prev_count:
+					_stale_scrolls += 1
+					if _stale_scrolls >= _MAX_STALE:
+						print(f"⚠️ No new results after {_MAX_STALE} scrolls ({cur_count} videos) — stopping scroll.")
+						break
+				else:
+					_stale_scrolls = 0
+				_prev_count = cur_count
 
 			await page.wait_for_selector("ytd-video-renderer")
 
