@@ -45,6 +45,14 @@ function fmtAvg(n) {
     return Number(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
+function fmtDate(yyyymmdd) {
+    if (!yyyymmdd || yyyymmdd.length !== 8) return "–";
+    const y = yyyymmdd.slice(0, 4);
+    const m = yyyymmdd.slice(4, 6);
+    const d = yyyymmdd.slice(6, 8);
+    return `${y}-${m}-${d}`;
+}
+
 function getFilterParams() {
     const p = new URLSearchParams();
     p.set("lang", state.lang);
@@ -71,6 +79,12 @@ function getFilterParams() {
         if (v !== "") p.set(key, v);
     }
 
+    // Date filters: convert YYYY-MM-DD (input[type=date]) → YYYYMMDD
+    const afterVal = $("#fLastUploadedAfter").value;
+    if (afterVal) p.set("last_uploaded_after", afterVal.replace(/-/g, ""));
+    const beforeVal = $("#fLastUploadedBefore").value;
+    if (beforeVal) p.set("last_uploaded_before", beforeVal.replace(/-/g, ""));
+
     const verified = $("#fIsVerified").value;
     if (verified !== "") p.set("is_verified", verified);
 
@@ -82,7 +96,7 @@ function getFilterParams() {
 
 // ── Fetch Channels ─────────────────────────────────────────────────────────
 async function fetchChannels() {
-    tbody.innerHTML = `<tr><td colspan="8" class="loading"><div class="spinner"></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="loading"><div class="spinner"></div></td></tr>`;
 
     const params = getFilterParams();
     try {
@@ -96,7 +110,7 @@ async function fetchChannels() {
         renderTable();
         renderPagination();
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
         console.error(err);
     }
 }
@@ -118,7 +132,7 @@ async function fetchStats() {
 // ── Render Table ───────────────────────────────────────────────────────────
 function renderTable() {
     if (state.channels.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
         return;
     }
 
@@ -146,6 +160,7 @@ function renderTable() {
             <td class="num">${fmt(ch.hit_videos_count)}</td>
             <td class="num">${fmtAvg(ch.avg_views_on_channel)}</td>
             <td class="num">${fmt(ch.max_views_on_channel)}</td>
+            <td class="num date-cell">${fmtDate(ch.last_upload_date)}</td>
             <td><span class="relevance-badge ${relClass}">${relLabel}</span>${tagsHtml}</td>
             <td>
                 <div class="action-btns">
@@ -298,6 +313,8 @@ btnReset.addEventListener("click", () => {
     $("#fMinAvgViews").value = "5000";
     $("#fMinSubscribers").value = "";
     $("#fMaxSubscribers").value = "";
+    $("#fLastUploadedAfter").value = "";
+    $("#fLastUploadedBefore").value = "";
     $("#fIsVerified").value = "";
     $("#fChannelName").value = "";
     $("#fRelevance").value = "all";
@@ -372,6 +389,31 @@ $$(".filter-group input, .filter-group select").forEach(el => {
     el.addEventListener("keydown", (e) => {
         if (e.key === "Enter") { state.page = 1; fetchChannels(); }
     });
+});
+
+// ── Sidebar toggle ─────────────────────────────────────────────────────────
+const btnToggleSidebar = $("#btnToggleSidebar");
+const mainLayout = $("#mainLayout");
+
+function applySidebarState(active) {
+    if (active) {
+        mainLayout.classList.add("sidebar-mode");
+        btnToggleSidebar.classList.add("active");
+    } else {
+        mainLayout.classList.remove("sidebar-mode");
+        btnToggleSidebar.classList.remove("active");
+    }
+}
+
+// Restore sidebar state from localStorage
+if (localStorage.getItem("sidebarMode") === "true") {
+    applySidebarState(true);
+}
+
+btnToggleSidebar.addEventListener("click", () => {
+    const isActive = mainLayout.classList.toggle("sidebar-mode");
+    btnToggleSidebar.classList.toggle("active", isActive);
+    localStorage.setItem("sidebarMode", isActive);
 });
 
 // ── Init ───────────────────────────────────────────────────────────────────

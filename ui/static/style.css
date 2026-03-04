@@ -47,6 +47,23 @@ header h1 {
     color: var(--text);
 }
 
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.btn-icon {
+    font-size: .8rem;
+    padding: 6px 14px;
+}
+
+.btn-icon.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
 /* ── Language Toggle ────────────────────────────────────────────────────── */
 .lang-toggle {
     display: flex;
@@ -107,7 +124,35 @@ header h1 {
 .stat-badge.orange .value { color: var(--orange); }
 .stat-badge.blue   .value { color: var(--blue); }
 
-/* ── Filter Panel ───────────────────────────────────────────────────────── */
+/* ── Layout (normal + sidebar) ───────────────────────────────────── */
+.main-layout {
+    display: block;
+}
+
+.main-layout .content-area {
+    min-width: 0; /* prevent grid blow-out */
+}
+
+.main-layout.sidebar-mode {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 16px;
+    align-items: start;
+}
+
+.main-layout.sidebar-mode .filter-panel {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    margin-bottom: 0;
+}
+
+.main-layout.sidebar-mode .filter-grid {
+    grid-template-columns: 1fr;
+}
+
+/* ── Filter Panel ─────────────────────────────────────────────── */
 .filter-panel {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -180,6 +225,7 @@ header h1 {
     display: flex;
     gap: 8px;
     margin-top: 14px;
+    flex-wrap: wrap;
 }
 
 .btn {
@@ -480,3 +526,12 @@ tbody td {
 
 /* ── Number formatting ──────────────────────────────────────────────────── */
 .num { font-variant-numeric: tabular-nums; }
+
+/* ── Date cell ────────────────────────────────────────────────── */
+.date-cell { font-family: 'Inter', monospace; letter-spacing: .3px; }
+
+/* ── Date input dark theme ────────────────────────────────────────── */
+input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.8);
+    cursor: pointer;
+}

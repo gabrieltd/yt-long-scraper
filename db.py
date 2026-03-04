@@ -126,8 +126,15 @@ async def create_tables(language: str = "es") -> None:
                 channel_name TEXT,
                 subscriber_count BIGINT,
                 is_verified BOOLEAN,
+                last_upload_date TEXT,
                 extracted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
+        """)
+
+        # Migration: add last_upload_date if table already exists without it
+        await conn.execute(f"""
+            ALTER TABLE channels_raw{lang_suffix}
+            ADD COLUMN IF NOT EXISTS last_upload_date TEXT;
         """)
 
         # channel_videos_raw
@@ -477,13 +484,14 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
 
     table_name = _get_table_name("channels_raw")
     await pool.execute(f"""
-        INSERT INTO {table_name} (channel_url, channel_id, channel_name, subscriber_count, is_verified, extracted_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO {table_name} (channel_url, channel_id, channel_name, subscriber_count, is_verified, last_upload_date, extracted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT(channel_url) DO UPDATE SET
             channel_id=COALESCE(EXCLUDED.channel_id, {table_name}.channel_id),
             channel_name=COALESCE(EXCLUDED.channel_name, {table_name}.channel_name),
             subscriber_count=COALESCE(EXCLUDED.subscriber_count, {table_name}.subscriber_count),
             is_verified=COALESCE(EXCLUDED.is_verified, {table_name}.is_verified),
+            last_upload_date=COALESCE(EXCLUDED.last_upload_date, {table_name}.last_upload_date),
             extracted_at=EXCLUDED.extracted_at
     """, 
         url,
@@ -491,6 +499,7 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
         channel.get("channel_name"),
         channel.get("subscriber_count"),
         bool(channel.get("is_verified")),
+        channel.get("last_upload_date"),
         _ensure_datetime(channel.get("extracted_at")) or _utcnow()
     )
 

@@ -20,9 +20,12 @@ import os
 import subprocess
 import sys
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Iterator
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 from dotenv import load_dotenv
 
 from db import (
@@ -146,6 +149,80 @@ def _coerce_bool(value: Any) -> bool | None:
 	return None
 
 
+# ── YouTube RSS feed helper ──────────────────────────────────────────
+_YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+_RSS_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+_RSS_MEDIA_NS = "{http://search.yahoo.com/mrss/}"
+_RSS_YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
+
+
+def fetch_rss_dates(
+	channel_id: str,
+	*,
+	timeout_seconds: int = 15,
+) -> tuple[dict[str, str], str | None]:
+	"""Fetch video dates from the YouTube channel RSS/Atom feed.
+
+	Returns:
+		(video_dates, last_upload_date)
+
+		video_dates:
+			dict mapping video_id -> upload_date string (YYYYMMDD).
+			Contains up to the 15 most recent videos.
+
+		last_upload_date:
+			The most recent upload date as YYYYMMDD, or None if the feed
+			could not be fetched / parsed.
+	"""
+	if not channel_id:
+		return {}, None
+
+	url = _YOUTUBE_RSS_URL.format(channel_id=channel_id)
+	try:
+		req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+		with urlopen(req, timeout=timeout_seconds) as resp:
+			xml_bytes = resp.read()
+	except (URLError, OSError, TimeoutError) as e:
+		print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][rss] failed to fetch feed for {channel_id}: {e}\033[0m")
+		return {}, None
+
+	try:
+		root = ET.fromstring(xml_bytes)
+	except ET.ParseError as e:
+		print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][rss] failed to parse XML for {channel_id}: {e}\033[0m")
+		return {}, None
+
+	video_dates: dict[str, str] = {}
+	latest_date: str | None = None
+
+	for entry in root.findall(f"{_RSS_ATOM_NS}entry"):
+		# Extract video ID from <yt:videoId>VIDEO_ID</yt:videoId>
+		vid_el = entry.find(f"{_RSS_YT_NS}videoId")
+		pub_el = entry.find(f"{_RSS_ATOM_NS}published")
+
+		if vid_el is None or pub_el is None:
+			continue
+		if vid_el.text is None or pub_el.text is None:
+			continue
+
+		video_id = vid_el.text.strip()
+		# The <published> tag looks like: 2025-01-15T14:00:00+00:00
+		try:
+			dt = datetime.fromisoformat(pub_el.text.strip())
+			date_str = dt.strftime("%Y%m%d")
+		except ValueError:
+			continue
+
+		video_dates[video_id] = date_str
+		if latest_date is None or date_str > latest_date:
+			latest_date = date_str
+
+	if video_dates:
+		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][rss] got {len(video_dates)} dates from feed (latest={latest_date})\033[0m")
+
+	return video_dates, latest_date
+
+
 
 def run_ytdlp_channel_dump(
 	channel_url: str,
@@ -217,7 +294,12 @@ def run_ytdlp_channel_dump(
 	return data
 
 
-def parse_channel_raw(channel_url: str, dump: dict[str, Any]) -> dict[str, Any]:
+def parse_channel_raw(
+	channel_url: str,
+	dump: dict[str, Any],
+	*,
+	last_upload_date: str | None = None,
+) -> dict[str, Any]:
 	"""Extract raw channel metadata from a yt-dlp dump.
 
 Missing fields are left as None.
@@ -244,6 +326,7 @@ Missing fields are left as None.
 		"channel_name": channel_name,
 		"subscriber_count": subscriber_count,
 		"is_verified": is_verified,
+		"last_upload_date": last_upload_date,
 		"extracted_at": _utcnow(),
 	}
 
@@ -368,10 +451,32 @@ Returns:
 		channel_row = parse_channel_raw(channel_url, dump)
 		video_rows = parse_channel_videos_raw(channel_url, dump, max_videos=max_videos)
 
-		# 3) Persist raw data via db.py (async), executed on the DB loop thread.
+		# 3) Supplement dates from YouTube RSS feed.
+		#    yt-dlp --flat-playlist often returns no upload_date.
+		#    The RSS feed gives exact dates for the 15 most recent videos.
+		channel_id = channel_row.get("channel_id")
+		if channel_id:
+			rss_dates, last_upload_date = fetch_rss_dates(channel_id)
+
+			# Backfill missing upload_date on video rows.
+			if rss_dates:
+				backfilled = 0
+				for vrow in video_rows:
+					if not vrow.get("upload_date"):
+						rss_date = rss_dates.get(vrow["video_id"])
+						if rss_date:
+							vrow["upload_date"] = rss_date
+							backfilled += 1
+				if backfilled:
+					print(f"\033[96m[{_utcnow().strftime('%H:%M:%S')}][rss] backfilled {backfilled} missing dates\033[0m")
+
+			# Store last_upload_date on the channel row.
+			channel_row["last_upload_date"] = last_upload_date
+
+		# 4) Persist raw data via db.py (async), executed on the DB loop thread.
 		db.run(upsert_channel_raw(channel_row))
 		db.run(upsert_channel_videos_raw(channel_url, video_rows))
-		# 4) Mark processed ONLY after successful fetch + persistence.
+		# 5) Mark processed ONLY after successful fetch + persistence.
 		db.run(mark_channel_processed(channel_url, status="success"))
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][ok] processed: {channel_url} (videos={len(video_rows)})\033[0m")
 		return (channel_url, "processed")
