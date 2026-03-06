@@ -14,6 +14,8 @@ const state = {
     // Modal
     modalChannelUrl: null,
     modalTags: [],
+    // Bulk Selection
+    selectedUrls: new Set(),
 };
 
 // ── DOM References ─────────────────────────────────────────────────────────
@@ -33,6 +35,13 @@ const tagsWrapper = $("#tagsWrapper");
 const tagInput = $("#tagInput");
 const btnModalCancel = $("#btnModalCancel");
 const btnModalSave = $("#btnModalSave");
+
+// Added for bulk actions
+const selectAllCheckbox = $("#selectAllCheckbox");
+const bulkActions = $("#bulkActions");
+const selectedCount = $("#selectedCount");
+const btnBulkRelevant = $("#btnBulkRelevant");
+const btnBulkNotRelevant = $("#btnBulkNotRelevant");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(n) {
@@ -102,7 +111,7 @@ function getFilterParams() {
 
 // ── Fetch Channels ─────────────────────────────────────────────────────────
 async function fetchChannels() {
-    tbody.innerHTML = `<tr><td colspan="10" class="loading"><div class="spinner"></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="loading"><div class="spinner"></div></td></tr>`;
 
     const params = getFilterParams();
     try {
@@ -116,7 +125,7 @@ async function fetchChannels() {
         renderTable();
         renderPagination();
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="10" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
         console.error(err);
     }
 }
@@ -138,7 +147,8 @@ async function fetchStats() {
 // ── Render Table ───────────────────────────────────────────────────────────
 function renderTable() {
     if (state.channels.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="10" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
+        updateBulkActionsUI();
         return;
     }
 
@@ -157,7 +167,12 @@ function renderTable() {
             ? ch.tags.map(t => `<span class="tag-chip" style="margin-left:4px;font-size:.7rem">${t}</span>`).join("")
             : "";
 
+        const isChecked = state.selectedUrls.has(ch.channel_url) ? "checked" : "";
+
         return `<tr data-idx="${i}">
+            <td style="text-align: center;">
+                <input type="checkbox" class="row-checkbox" data-url="${encodeURIComponent(ch.channel_url)}" ${isChecked} />
+            </td>
             <td>
                 <a class="channel-link" href="${ch.channel_url}" target="_blank" rel="noopener">${ch.channel_name || "Unknown"}</a>${verified}
             </td>
@@ -178,6 +193,28 @@ function renderTable() {
             </td>
         </tr>`;
     }).join("");
+
+    updateBulkActionsUI();
+}
+
+function updateBulkActionsUI() {
+    const total = state.selectedUrls.size;
+    
+    if (total > 0) {
+        bulkActions.style.display = "flex";
+        selectedCount.textContent = `${total} selected`;
+    } else {
+        bulkActions.style.display = "none";
+    }
+
+    if (state.channels.length > 0) {
+        const allOnPageSelected = state.channels.every(ch => state.selectedUrls.has(ch.channel_url));
+        selectAllCheckbox.checked = allOnPageSelected && total > 0;
+        selectAllCheckbox.indeterminate = total > 0 && !allOnPageSelected;
+    } else {
+        selectAllCheckbox.checked = false;
+        selectAllCheckbox.indeterminate = false;
+    }
 }
 
 // ── Render Pagination ──────────────────────────────────────────────────────
@@ -370,6 +407,65 @@ btnModalCancel.addEventListener("click", closeModal);
 modalOverlay.addEventListener("click", (e) => { if (e.target === modalOverlay) closeModal(); });
 
 btnModalSave.addEventListener("click", saveModal);
+
+// Bulk Selection Event Listeners
+selectAllCheckbox.addEventListener("change", (e) => {
+    const isChecked = e.target.checked;
+    state.channels.forEach(ch => {
+        if (isChecked) {
+            state.selectedUrls.add(ch.channel_url);
+        } else {
+            state.selectedUrls.delete(ch.channel_url);
+        }
+    });
+    
+    $$(".row-checkbox").forEach(cb => cb.checked = isChecked);
+    updateBulkActionsUI();
+});
+
+tbody.addEventListener("change", (e) => {
+    if (e.target.classList.contains("row-checkbox")) {
+        const url = decodeURIComponent(e.target.dataset.url);
+        if (e.target.checked) {
+            state.selectedUrls.add(url);
+        } else {
+            state.selectedUrls.delete(url);
+        }
+        updateBulkActionsUI();
+    }
+});
+
+async function markBulkRelevance(isRelevant) {
+    if (state.selectedUrls.size === 0) return;
+    const urls = Array.from(state.selectedUrls);
+    
+    try {
+        await fetch(`/api/channels/bulk-relevance`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                lang: state.lang,
+                channel_urls: urls,
+                is_relevant: isRelevant
+            }),
+        });
+        
+        state.channels.forEach(ch => {
+            if (state.selectedUrls.has(ch.channel_url)) {
+                ch.is_relevant = isRelevant;
+            }
+        });
+        
+        state.selectedUrls.clear();
+        renderTable();
+        fetchStats();
+    } catch (err) {
+        console.error("Error bulk marking relevance:", err);
+    }
+}
+
+btnBulkRelevant.addEventListener("click", () => markBulkRelevance(true));
+btnBulkNotRelevant.addEventListener("click", () => markBulkRelevance(false));
 
 // Tag input
 tagInput.addEventListener("keydown", (e) => {

@@ -261,6 +261,13 @@ header h1 {
     border-radius: var(--radius);
 }
 
+.table-wrapper input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;

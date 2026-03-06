@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from db import init_pool, close_pool, get_filtered_channels, set_channel_relevance, get_distinct_tags, get_summary_stats
+from db import init_pool, close_pool, get_filtered_channels, set_channel_relevance, set_channels_relevance_bulk, get_distinct_tags, get_summary_stats
 
 
 @asynccontextmanager
@@ -104,6 +104,22 @@ async def api_set_relevance(channel_url: str, body: RelevanceBody):
         is_relevant=body.is_relevant,
         notes=body.notes,
         tags=body.tags,
+    )
+    return {"ok": True}
+
+
+class BulkRelevanceBody(BaseModel):
+    lang: str
+    channel_urls: list[str]
+    is_relevant: bool | None = None
+
+
+@app.post("/api/channels/bulk-relevance")
+async def api_set_bulk_relevance(body: BulkRelevanceBody):
+    await set_channels_relevance_bulk(
+        body.lang,
+        body.channel_urls,
+        is_relevant=body.is_relevant,
     )
     return {"ok": True}
 

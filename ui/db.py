@@ -299,6 +299,32 @@ async def set_channel_relevance(
     )
 
 
+async def set_channels_relevance_bulk(
+    lang: str,
+    channel_urls: list[str],
+    *,
+    is_relevant: bool | None,
+) -> None:
+    """Bulk upsert channel relevance."""
+    if not channel_urls:
+        return
+    lang = _validate_lang(lang)
+    pool = _require_pool()
+
+    tuples = [(url, is_relevant) for url in channel_urls]
+
+    await pool.executemany(
+        f"""
+        INSERT INTO channel_relevance_{lang} (channel_url, is_relevant, notes, tags, marked_at)
+        VALUES ($1, $2, NULL, NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT (channel_url) DO UPDATE SET
+            is_relevant = EXCLUDED.is_relevant,
+            marked_at = CURRENT_TIMESTAMP
+        """,
+        tuples
+    )
+
+
 # ─── Tags ──────────────────────────────────────────────────────────────────
 
 async def get_distinct_tags(lang: str) -> list[str]:

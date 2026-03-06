@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Channel Relevance – YouTube Niche Scrapper</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=2" />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap" rel="stylesheet" />
 </head>
 <body>
@@ -136,9 +136,15 @@
 
     <!-- ── Data Table ─────────────────────────────────────────────── -->
     <div class="table-wrapper">
+        <div class="bulk-actions" id="bulkActions" style="display: none; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-card); gap: 10px; align-items: center;">
+            <span id="selectedCount" style="font-size: 0.85rem; color: var(--text-dim); font-weight: 500;">0 selected</span>
+            <button class="btn btn-secondary btn-icon" id="btnBulkRelevant" title="Mark Selected Relevant">👍 Relevant</button>
+            <button class="btn btn-secondary btn-icon" id="btnBulkNotRelevant" title="Mark Selected Not Relevant">👎 Not Relevant</button>
+        </div>
         <table>
             <thead>
                 <tr>
+                    <th style="width: 40px; text-align: center;"><input type="checkbox" id="selectAllCheckbox" /></th>
                     <th data-sort="channel_name">Channel <span class="sort-arrow"></span></th>
                     <th data-sort="subscriber_count">Subscribers <span class="sort-arrow"></span></th>
                     <th data-sort="total_videos_tracked">Videos <span class="sort-arrow"></span></th>
@@ -152,7 +158,7 @@
                 </tr>
             </thead>
             <tbody id="channelTableBody">
-                <tr><td colspan="10" class="loading"><div class="spinner"></div></td></tr>
+                <tr><td colspan="11" class="loading"><div class="spinner"></div></td></tr>
             </tbody>
         </table>
     </div>
@@ -189,6 +195,6 @@
     </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>
