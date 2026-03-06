@@ -178,6 +178,7 @@ jobs:
 
   normalization:
     needs: discovery
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -208,6 +209,7 @@ jobs:
   # Step 3a: Count pending channels from DB and build the channel matrix
   prepare-channel-matrix:
     needs: normalization
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
@@ -293,8 +295,8 @@ jobs:
   # Step 3b: Run channel discovery in parallel
   channel-discovery:
     needs: prepare-channel-matrix
-    # Skip entirely if there are no pending channels
-    if: needs.prepare-channel-matrix.outputs.matrix != '[]'
+    # Skip if workflow was cancelled or if there are no pending channels
+    if: ${{ !cancelled() && needs.prepare-channel-matrix.outputs.matrix != '[]' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
