@@ -98,7 +98,7 @@ jobs:
   discovery:
     needs: prepare-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

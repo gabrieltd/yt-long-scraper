@@ -1,0 +1,328 @@
+name: Full Pipeline (Discovery → Normalization → Channel Discovery)
+
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: 'Language/Locale (EN for English, ES for Spanish)'
+        required: false
+        default: 'ES'
+        type: choice
+        options:
+          - 'EN'
+          - 'ES'
+      upload_date:
+        description: 'Filter by upload date'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'last_hour'
+          - 'today'
+          - 'this_week'
+          - 'this_month'
+          - 'this_year'
+      duration:
+        description: 'Filter by video duration'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'under_4'
+          - '4_20'
+          - 'over_20'
+      sort_by:
+        description: 'Sort results by'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'relevance'
+          - 'upload_date'
+          - 'view_count'
+          - 'rating'
+      reprocess_duplicates:
+        description: 'Reprocess queries that have already been executed'
+        required: false
+        default: false
+        type: boolean
+      max_jobs:
+        description: 'Number of parallel machines to use for both discovery phases'
+        required: false
+        default: '19'
+        type: string
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1 – Video Discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  # Step 1a: Calculate which discovery batches have pending queries
+  prepare-discovery-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      batch_size: ${{ steps.set-matrix.outputs.batch_size }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Calculate Discovery Matrix
+        id: set-matrix
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          pip install -r requirements.txt
+
+          MAX_JOBS=${{ inputs.max_jobs }}
+
+          # Count total queries in the file (pure Python, no DB needed)
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            QUERIES_FILE="queries_en.txt"
+          else
+            QUERIES_FILE="queries.txt"
+          fi
+
+          TOTAL_QUERIES=$(python -c "
+          import math, pathlib
+          lines = [l.strip() for l in pathlib.Path('${QUERIES_FILE}').read_text(encoding='utf-8').splitlines() if l.strip()]
+          print(math.ceil(len(lines) / ${MAX_JOBS}))
+          ")
+
+          echo "Total queries file: ${QUERIES_FILE}"
+          echo "Computed batch_size: ${TOTAL_QUERIES} (ceil(total / ${MAX_JOBS}))"
+
+          # Build command with language flag
+          CMD="python run_discovery.py --check-batches --batch-size ${TOTAL_QUERIES}"
+
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+
+          if [ "${{ inputs.reprocess_duplicates }}" = "true" ]; then
+            CMD="$CMD --reprocess-duplicates"
+          fi
+
+          $CMD > matrix.json
+          MATRIX_JSON=$(cat matrix.json)
+          echo "Generated Discovery Matrix: $MATRIX_JSON"
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "batch_size=${TOTAL_QUERIES}" >> $GITHUB_OUTPUT
+
+  # Step 1b: Run discovery in parallel across all pending batches
+  discovery:
+    needs: prepare-discovery-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        batch_index: ${{ fromJson(needs.prepare-discovery-matrix.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-discovery.txt
+          playwright install chromium
+
+      - name: Run Discovery Batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          CMD="python run_discovery.py --batch-size ${{ needs.prepare-discovery-matrix.outputs.batch_size }} --batch-index ${{ matrix.batch_index }}"
+
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+
+          if [ "${{ inputs.reprocess_duplicates }}" = "true" ]; then
+            CMD="$CMD --reprocess-duplicates"
+          fi
+
+          if [ -n "${{ inputs.upload_date }}" ]; then
+            CMD="$CMD --upload-date ${{ inputs.upload_date }}"
+          fi
+
+          if [ -n "${{ inputs.duration }}" ]; then
+            CMD="$CMD --duration ${{ inputs.duration }}"
+          fi
+
+          if [ -n "${{ inputs.sort_by }}" ]; then
+            CMD="$CMD --sort-by ${{ inputs.sort_by }}"
+          fi
+
+          echo "Running: $CMD"
+          $CMD
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2 – Normalization & Validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+  normalization:
+    needs: discovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Normalization & Validation
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            python yt_normalization_validation.py --EN
+          else
+            python yt_normalization_validation.py --ES
+          fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 – Channel Discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # Step 3a: Count pending channels from DB and build the channel matrix
+  prepare-channel-matrix:
+    needs: normalization
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      channels_per_job: ${{ steps.set-matrix.outputs.channels_per_job }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Calculate Channel Matrix
+        id: set-matrix
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          MAX_JOBS=${{ inputs.max_jobs }}
+
+          # Count pending channels using the DB query
+          PENDING=$(python - <<'EOF'
+          import asyncio, math, os, sys
+          sys.path.insert(0, ".")
+          import db
+          from dotenv import load_dotenv
+          load_dotenv()
+
+          LANG = "en" if "${{ inputs.language }}" == "EN" else "es"
+
+          async def count():
+              await db.init_db(language=LANG)
+              conn = db._pool  # use the underlying asyncpg pool
+              row = await conn.fetchrow("""
+                  SELECT COUNT(DISTINCT vn.channel_url) AS canales_pendientes
+                  FROM videos_normalized_{lang} vn
+                  LEFT JOIN channels_processed_{lang} cp ON vn.channel_url = cp.channel_url
+                  LEFT JOIN channels_discovery_claims_{lang} cdc ON vn.channel_url = cdc.channel_url
+                  WHERE
+                      vn.validation_passed = TRUE
+                      AND vn.channel_url IS NOT NULL
+                      AND cp.channel_url IS NULL
+                      AND cdc.channel_url IS NULL
+              """.replace("{lang}", LANG))
+              await db.close_db()
+              return row["canales_pendientes"] if row else 0
+
+          count_val = asyncio.run(count())
+          print(count_val)
+          EOF
+          )
+
+          echo "Pending channels: ${PENDING}"
+
+          if [ "${PENDING}" -le 0 ]; then
+            echo "No pending channels. Skipping channel discovery."
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "channels_per_job=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # channels_per_job = ceil(pending / max_jobs)
+          CHANNELS_PER_JOB=$(python -c "import math; print(math.ceil(${PENDING} / ${MAX_JOBS}))")
+          echo "channels_per_job: ${CHANNELS_PER_JOB}"
+
+          # Build matrix [0, 1, ..., MAX_JOBS-1]
+          MATRIX_JSON="["
+          for (( i=0; i<MAX_JOBS; i++ )); do
+            MATRIX_JSON="$MATRIX_JSON$i"
+            if [ $i -lt $((MAX_JOBS-1)) ]; then
+              MATRIX_JSON="$MATRIX_JSON, "
+            fi
+          done
+          MATRIX_JSON="$MATRIX_JSON]"
+
+          echo "Generated Channel Matrix: $MATRIX_JSON"
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "channels_per_job=${CHANNELS_PER_JOB}" >> $GITHUB_OUTPUT
+
+  # Step 3b: Run channel discovery in parallel
+  channel-discovery:
+    needs: prepare-channel-matrix
+    # Skip entirely if there are no pending channels
+    if: needs.prepare-channel-matrix.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job_index: ${{ fromJson(needs.prepare-channel-matrix.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements-channel.txt
+
+      - name: Run Channel Discovery
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Starting Job ${{ matrix.job_index }} — processing ${{ needs.prepare-channel-matrix.outputs.channels_per_job }} channels"
+          CMD="python yt_channel_discovery.py --limit-channels ${{ needs.prepare-channel-matrix.outputs.channels_per_job }}"
+
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+
+          $CMD
