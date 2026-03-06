@@ -243,7 +243,7 @@ jobs:
 
           async def count():
               await db.init_db(language=LANG)
-              conn = db._pool  # use the underlying asyncpg pool
+              conn = db._DB_POOL  # use the underlying asyncpg pool
               row = await conn.fetchrow("""
                   SELECT COUNT(DISTINCT vn.channel_url) AS canales_pendientes
                   FROM videos_normalized_{lang} vn
