@@ -238,8 +238,6 @@ jobs:
           import asyncio, math, os, sys
           sys.path.insert(0, ".")
           import db
-          from dotenv import load_dotenv
-          load_dotenv()
 
           LANG = "en" if "${{ inputs.language }}" == "EN" else "es"
 
