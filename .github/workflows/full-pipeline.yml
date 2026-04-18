@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       language:
-        description: 'Language/Locale (EN for English, ES for Spanish)'
+        description: 'Language/Locale (EN for English, ES for Spanish) nigger'
         required: false
         default: 'ES'
         type: choice
