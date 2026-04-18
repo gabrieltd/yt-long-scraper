@@ -72,7 +72,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          echo "Starting Job ${{ matrix.job_index }} processing ${{ inputs.channels_per_job }} channels"
+          echo "Starting Job  ${{ matrix.job_index }} processing ${{ inputs.channels_per_job }} channels"
           # The script uses DB claiming, so multiple jobs will automatically pick different channels.
           # We pass limit-channels to control batch size per job.
           CMD="python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }}"
