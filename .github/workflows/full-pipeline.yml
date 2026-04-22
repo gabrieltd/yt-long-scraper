@@ -120,7 +120,7 @@ jobs:
   discovery:
     needs: prepare-discovery-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     continue-on-error: true  # stalled/timed-out batches are logged as warnings; pipeline still advances
     strategy:
       fail-fast: false
