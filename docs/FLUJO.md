@@ -58,7 +58,8 @@ Archivo: [yt_channel_discovery.py](../yt_channel_discovery.py)
   - `validation_passed = true`
   - excluye canales ya presentes en `channels_processed`
 - Para cada canal en paralelo (Workers):
-  - Ejecuta `yt-dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
+  - Ejecuta `python -m yt_dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
+  - Resuelve `yt_dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
   - Persiste:
     - `channels_raw` (metadata de canal)
     - `channel_videos_raw` (últimos N videos del canal)

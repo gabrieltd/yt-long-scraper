@@ -19,7 +19,7 @@ El pipeline (simplificado) es:
 
 Dependencias principales (ver [requirements.txt](requirements.txt)):
 - `playwright`
-- `yt-dlp`
+- `yt-dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
 - `asyncpg`
 - `python-dotenv`
 - `streamlit`
@@ -48,6 +48,7 @@ python -m venv .venv
 # activar venv (PowerShell)
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python -m pip install -e "./yt-dlp/yt-dlp[default]"
 python -m playwright install
 ```
 
@@ -98,6 +99,7 @@ python yt_normalization_validation.py
 
 **Enriquecimiento (yt-dlp a nivel canal):**
 ```bash
+# usa el yt-dlp local vendorizado en yt-dlp/yt-dlp
 python yt_channel_discovery.py
 ```
 

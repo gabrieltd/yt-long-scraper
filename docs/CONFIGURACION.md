@@ -16,6 +16,7 @@ python -m venv .venv
 
 ```bash
 pip install -r requirements.txt
+python -m pip install -e "./yt-dlp/yt-dlp[default]"
 ```
 
 3) Instalar navegadores de Playwright:
@@ -49,6 +50,7 @@ python yt_normalization_validation.py
 ### 3) Enriquecimiento de canales (yt-dlp)
 
 Lee los canales de videos validados y extrae información detallada usando yt-dlp. Guarda en `channels_raw` y `channel_videos_raw`.
+El script usa el source local vendorizado en `yt-dlp/yt-dlp`.
 
 ```bash
 python yt_channel_discovery.py

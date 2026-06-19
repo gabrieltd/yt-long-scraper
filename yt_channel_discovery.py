@@ -23,6 +23,7 @@ import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Iterator
 from urllib.request import urlopen, Request
 from urllib.error import URLError
@@ -50,6 +51,29 @@ MAX_WORKERS = 6
 
 # Number of channels to claim per DB round-trip.
 DISCOVERY_BATCH_SIZE = 200
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+LOCAL_YTDLP_ROOT = PROJECT_ROOT / "yt-dlp" / "yt-dlp"
+LOCAL_YTDLP_MAIN = LOCAL_YTDLP_ROOT / "yt_dlp" / "__main__.py"
+
+
+def _local_ytdlp_env() -> dict[str, str]:
+	"""Return an environment that resolves yt_dlp from the vendored source tree."""
+	if not LOCAL_YTDLP_MAIN.is_file():
+		raise RuntimeError(
+			"Local yt-dlp source is missing. Expected "
+			f"{LOCAL_YTDLP_MAIN}. Clone or vendor yt-dlp into yt-dlp/yt-dlp."
+		)
+
+	env = os.environ.copy()
+	pythonpath = env.get("PYTHONPATH")
+	env["PYTHONPATH"] = (
+		str(LOCAL_YTDLP_ROOT)
+		if not pythonpath
+		else os.pathsep.join([str(LOCAL_YTDLP_ROOT), pythonpath])
+	)
+	return env
 
 
 class _DBRunner:
@@ -251,6 +275,7 @@ def run_ytdlp_channel_dump(
 		max_videos = 1
 
 	channel_url_videos = channel_url + "/videos"
+	env = _local_ytdlp_env()
 	cmd = [
 		sys.executable,
 		"-m",
@@ -274,6 +299,7 @@ def run_ytdlp_channel_dump(
 			capture_output=True,
 			text=True,
 			timeout=timeout_seconds,
+			env=env,
 		)
 	except subprocess.TimeoutExpired as e:
 		raise RuntimeError(f"yt-dlp timeout for {channel_url}") from e
