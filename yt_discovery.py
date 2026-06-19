@@ -204,12 +204,13 @@ async def run(
 			_prev_count = 0
 			_stale_scrolls = 0
 			_MAX_STALE = 5  # break after 5 consecutive scrolls with no new videos
+			_SCROLL_PAUSE_SECONDS = 2
 
 			while True:
-				# Scroll down by evaluating scroll on the ytd-app element
-				await page.evaluate("document.querySelector('ytd-app').scrollIntoView({block: 'end', behavior: 'smooth'});")
+				# Scroll to the current bottom of the document to trigger YouTube's infinite loader.
+				await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight);")
 				# Wait for results to load
-				await asyncio.sleep(2)
+				await asyncio.sleep(_SCROLL_PAUSE_SECONDS)
 
 				# Check for 'No more results' message (supports both languages)
 				no_more_results = await page.locator(
