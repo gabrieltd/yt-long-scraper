@@ -6,13 +6,22 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from db import init_pool, close_pool, get_filtered_channels, set_channel_relevance, set_channels_relevance_bulk, get_distinct_tags, get_summary_stats
+from db import (
+    close_pool,
+    get_channel_details,
+    get_distinct_tags,
+    get_filtered_channels,
+    get_summary_stats,
+    init_pool,
+    set_channel_relevance,
+    set_channels_relevance_bulk,
+)
 
 
 @asynccontextmanager
@@ -86,6 +95,24 @@ async def api_channels(
         page=page,
         page_size=page_size,
     )
+    return JSONResponse(result)
+
+
+@app.get("/api/channels/{channel_url:path}/details")
+async def api_channel_details(
+    channel_url: str,
+    lang: str = Query("es", pattern="^(es|en)$"),
+    min_views_individual: int = Query(0, ge=0),
+    max_views_individual: int | None = Query(None, ge=0),
+):
+    result = await get_channel_details(
+        lang,
+        channel_url,
+        min_views_individual=min_views_individual,
+        max_views_individual=max_views_individual,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
     return JSONResponse(result)
 
 

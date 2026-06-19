@@ -173,6 +173,47 @@ def _coerce_bool(value: Any) -> bool | None:
 	return None
 
 
+def _string_or_none(value: Any) -> str | None:
+	return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _best_thumbnail_url(thumbnails: Any, *, kind: str) -> str | None:
+	"""Pick the most useful yt-dlp thumbnail for a channel or video."""
+	if not isinstance(thumbnails, list):
+		return None
+
+	valid = [item for item in thumbnails if isinstance(item, dict) and _string_or_none(item.get("url"))]
+	if not valid:
+		return None
+
+	preferred_id = f"{kind}_uncropped"
+	for item in valid:
+		if item.get("id") == preferred_id:
+			return _string_or_none(item.get("url"))
+
+	def area(item: dict[str, Any]) -> int:
+		return (_coerce_int(item.get("width")) or 0) * (_coerce_int(item.get("height")) or 0)
+
+	if kind == "avatar":
+		square = [
+			item for item in valid
+			if (_coerce_int(item.get("width")) or 0) > 0
+			and (_coerce_int(item.get("height")) or 0) > 0
+			and 0.8 <= (_coerce_int(item.get("width")) or 0) / (_coerce_int(item.get("height")) or 1) <= 1.25
+		]
+		if square:
+			return _string_or_none(max(square, key=area).get("url"))
+	elif kind == "banner":
+		wide = [
+			item for item in valid
+			if (_coerce_int(item.get("width")) or 0) > (_coerce_int(item.get("height")) or 0)
+		]
+		if wide:
+			return _string_or_none(max(wide, key=area).get("url"))
+
+	return _string_or_none(max(valid, key=area).get("url"))
+
+
 # ── YouTube RSS feed helper ──────────────────────────────────────────
 _YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 _RSS_ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -353,6 +394,9 @@ Missing fields are left as None.
 		subscriber_count = _coerce_int(dump.get("channel_follower_count"))
 
 	is_verified = _coerce_bool(dump.get("verified"))
+	channel_tags = dump.get("tags")
+	if not isinstance(channel_tags, list):
+		channel_tags = []
 
 	return {
 		"channel_url": channel_url,
@@ -360,6 +404,12 @@ Missing fields are left as None.
 		"channel_name": channel_name,
 		"subscriber_count": subscriber_count,
 		"is_verified": is_verified,
+		"channel_description": _string_or_none(dump.get("description")),
+		"channel_tags": [tag for tag in (_string_or_none(value) for value in channel_tags) if tag],
+		"avatar_url": _best_thumbnail_url(dump.get("thumbnails"), kind="avatar"),
+		"banner_url": _best_thumbnail_url(dump.get("thumbnails"), kind="banner"),
+		"uploader_id": _string_or_none(dump.get("uploader_id")),
+		"uploader_url": _string_or_none(dump.get("uploader_url")),
 		"last_upload_date": last_upload_date,
 		"first_upload_date": first_upload_date,
 		"extracted_at": _utcnow(),
@@ -433,6 +483,7 @@ def parse_channel_videos_raw(
 
 		duration_seconds = _coerce_int(entry.get("duration"))
 		view_count = _coerce_int(entry.get("view_count"))
+		video_url = _string_or_none(entry.get("url")) or f"https://www.youtube.com/watch?v={video_id}"
 
 		results.append(
 			{
@@ -441,6 +492,9 @@ def parse_channel_videos_raw(
 				"upload_date": upload_date_str,
 				"duration_seconds": duration_seconds,
 				"view_count": view_count,
+				"title": _string_or_none(entry.get("title")),
+				"video_url": video_url,
+				"thumbnail_url": _best_thumbnail_url(entry.get("thumbnails"), kind="video"),
 			}
 		)
 		count += 1

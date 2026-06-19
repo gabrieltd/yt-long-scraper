@@ -126,6 +126,12 @@ async def create_tables(language: str = "es") -> None:
                 channel_name TEXT,
                 subscriber_count BIGINT,
                 is_verified BOOLEAN,
+                channel_description TEXT,
+                channel_tags TEXT[],
+                avatar_url TEXT,
+                banner_url TEXT,
+                uploader_id TEXT,
+                uploader_url TEXT,
                 last_upload_date TEXT,
                 first_upload_date TEXT,
                 extracted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -144,6 +150,18 @@ async def create_tables(language: str = "es") -> None:
             ADD COLUMN IF NOT EXISTS first_upload_date TEXT;
         """)
 
+        for column, definition in (
+            ("channel_description", "TEXT"),
+            ("channel_tags", "TEXT[]"),
+            ("avatar_url", "TEXT"),
+            ("banner_url", "TEXT"),
+            ("uploader_id", "TEXT"),
+            ("uploader_url", "TEXT"),
+        ):
+            await conn.execute(
+                f"ALTER TABLE channels_raw{lang_suffix} ADD COLUMN IF NOT EXISTS {column} {definition};"
+            )
+
         # channel_videos_raw
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS channel_videos_raw{lang_suffix} (
@@ -152,9 +170,17 @@ async def create_tables(language: str = "es") -> None:
                 upload_date TEXT,
                 duration_seconds BIGINT,
                 view_count BIGINT,
+                title TEXT,
+                video_url TEXT,
+                thumbnail_url TEXT,
                 PRIMARY KEY (channel_url, video_id)
             );
         """)
+
+        for column in ("title", "video_url", "thumbnail_url"):
+            await conn.execute(
+                f"ALTER TABLE channel_videos_raw{lang_suffix} ADD COLUMN IF NOT EXISTS {column} TEXT;"
+            )
 
         # channels_processed
         await conn.execute(f"""
@@ -491,13 +517,23 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
 
     table_name = _get_table_name("channels_raw")
     await pool.execute(f"""
-        INSERT INTO {table_name} (channel_url, channel_id, channel_name, subscriber_count, is_verified, last_upload_date, first_upload_date, extracted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO {table_name} (
+            channel_url, channel_id, channel_name, subscriber_count, is_verified,
+            channel_description, channel_tags, avatar_url, banner_url, uploader_id, uploader_url,
+            last_upload_date, first_upload_date, extracted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT(channel_url) DO UPDATE SET
             channel_id=COALESCE(EXCLUDED.channel_id, {table_name}.channel_id),
             channel_name=COALESCE(EXCLUDED.channel_name, {table_name}.channel_name),
             subscriber_count=COALESCE(EXCLUDED.subscriber_count, {table_name}.subscriber_count),
             is_verified=COALESCE(EXCLUDED.is_verified, {table_name}.is_verified),
+            channel_description=COALESCE(EXCLUDED.channel_description, {table_name}.channel_description),
+            channel_tags=COALESCE(EXCLUDED.channel_tags, {table_name}.channel_tags),
+            avatar_url=COALESCE(EXCLUDED.avatar_url, {table_name}.avatar_url),
+            banner_url=COALESCE(EXCLUDED.banner_url, {table_name}.banner_url),
+            uploader_id=COALESCE(EXCLUDED.uploader_id, {table_name}.uploader_id),
+            uploader_url=COALESCE(EXCLUDED.uploader_url, {table_name}.uploader_url),
             last_upload_date=COALESCE(EXCLUDED.last_upload_date, {table_name}.last_upload_date),
             first_upload_date=COALESCE(EXCLUDED.first_upload_date, {table_name}.first_upload_date),
             extracted_at=EXCLUDED.extracted_at
@@ -506,7 +542,13 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
         channel.get("channel_id"),
         channel.get("channel_name"),
         channel.get("subscriber_count"),
-        bool(channel.get("is_verified")),
+        channel.get("is_verified"),
+        channel.get("channel_description"),
+        channel.get("channel_tags"),
+        channel.get("avatar_url"),
+        channel.get("banner_url"),
+        channel.get("uploader_id"),
+        channel.get("uploader_url"),
         channel.get("last_upload_date"),
         channel.get("first_upload_date"),
         _ensure_datetime(channel.get("extracted_at")) or _utcnow()
@@ -534,7 +576,10 @@ async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any
             vid,
             v.get("upload_date"),
             v.get("duration_seconds"),
-            v.get("view_count")
+            v.get("view_count"),
+            v.get("title"),
+            v.get("video_url"),
+            v.get("thumbnail_url"),
         ))
 
     if not tuples:
@@ -542,12 +587,18 @@ async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any
 
     table_name = _get_table_name("channel_videos_raw")
     await pool.executemany(f"""
-        INSERT INTO {table_name} (channel_url, video_id, upload_date, duration_seconds, view_count)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO {table_name} (
+            channel_url, video_id, upload_date, duration_seconds, view_count,
+            title, video_url, thumbnail_url
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT(channel_url, video_id) DO UPDATE SET
             upload_date=COALESCE(EXCLUDED.upload_date, {table_name}.upload_date),
             duration_seconds=COALESCE(EXCLUDED.duration_seconds, {table_name}.duration_seconds),
-            view_count=COALESCE(EXCLUDED.view_count, {table_name}.view_count)
+            view_count=COALESCE(EXCLUDED.view_count, {table_name}.view_count),
+            title=COALESCE(EXCLUDED.title, {table_name}.title),
+            video_url=COALESCE(EXCLUDED.video_url, {table_name}.video_url),
+            thumbnail_url=COALESCE(EXCLUDED.thumbnail_url, {table_name}.thumbnail_url)
     """, tuples)
     
     return len(tuples), 0

@@ -16,6 +16,8 @@ const state = {
     modalTags: [],
     // Bulk Selection
     selectedUrls: new Set(),
+    drawerChannelUrl: null,
+    drawerWidth: null,
 };
 
 // ── DOM References ─────────────────────────────────────────────────────────
@@ -42,6 +44,10 @@ const bulkActions = $("#bulkActions");
 const selectedCount = $("#selectedCount");
 const btnBulkRelevant = $("#btnBulkRelevant");
 const btnBulkNotRelevant = $("#btnBulkNotRelevant");
+const channelDrawer = $("#channelDrawer");
+const drawerBackdrop = $("#drawerBackdrop");
+const drawerContent = $("#drawerContent");
+const drawerResizeHandle = $("#drawerResizeHandle");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(n) {
@@ -60,6 +66,35 @@ function fmtDate(yyyymmdd) {
     const m = yyyymmdd.slice(4, 6);
     const d = yyyymmdd.slice(6, 8);
     return `${y}-${m}-${d}`;
+}
+
+function fmtDuration(seconds) {
+    if (seconds == null || !Number.isFinite(Number(seconds))) return "–";
+    const total = Math.max(0, Math.floor(Number(seconds)));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+        : `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>'"]/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+    })[char]);
+}
+
+function avatarMarkup(url, name, className = "channel-avatar") {
+    if (url) {
+        return `<img class="${className}" src="${escapeHtml(url)}" alt="" />`;
+    }
+    return `<span class="${className} avatar-fallback" aria-hidden="true">${escapeHtml((name || "?").slice(0, 1).toUpperCase())}</span>`;
+}
+
+function channelVideosUrl(channelUrl) {
+    const base = String(channelUrl || "").replace(/\/+$/, "");
+    return base.endsWith("/videos") ? base : `${base}/videos`;
 }
 
 function getFilterParams() {
@@ -164,7 +199,7 @@ function renderTable() {
         const verified = ch.is_verified ? `<span class="verified-badge" title="Verified">✓</span>` : "";
 
         const tagsHtml = ch.tags && ch.tags.length > 0
-            ? ch.tags.map(t => `<span class="tag-chip" style="margin-left:4px;font-size:.7rem">${t}</span>`).join("")
+            ? ch.tags.map(t => `<span class="tag-chip" style="margin-left:4px;font-size:.7rem">${escapeHtml(t)}</span>`).join("")
             : "";
 
         const isChecked = state.selectedUrls.has(ch.channel_url) ? "checked" : "";
@@ -174,7 +209,14 @@ function renderTable() {
                 <input type="checkbox" class="row-checkbox" data-url="${encodeURIComponent(ch.channel_url)}" ${isChecked} />
             </td>
             <td>
-                <a class="channel-link" href="${ch.channel_url}" target="_blank" rel="noopener">${ch.channel_name || "Unknown"}</a>${verified}
+                <span class="channel-cell">
+                    <a class="channel-thumbnail-link" href="${escapeHtml(channelVideosUrl(ch.channel_url))}" target="_blank" rel="noopener" title="Open channel videos">
+                        ${avatarMarkup(ch.avatar_url, ch.channel_name)}
+                    </a>
+                    <button class="channel-trigger" data-action="details" data-url="${encodeURIComponent(ch.channel_url)}" title="Open channel details">
+                        <span class="channel-link">${escapeHtml(ch.channel_name || "Unknown")}</span>${verified}
+                    </button>
+                </span>
             </td>
             <td class="num">${fmt(ch.subscriber_count)}</td>
             <td class="num">${fmt(ch.total_videos_tracked)}</td>
@@ -195,6 +237,165 @@ function renderTable() {
     }).join("");
 
     updateBulkActionsUI();
+}
+
+function closeDrawer() {
+    channelDrawer.classList.remove("open");
+    drawerBackdrop.classList.remove("open");
+    channelDrawer.setAttribute("aria-hidden", "true");
+    state.drawerChannelUrl = null;
+}
+
+const DRAWER_MIN_WIDTH = 400;
+const DRAWER_MAX_WIDTH = 720;
+const DRAWER_WIDTH_STORAGE_KEY = "channelDrawerWidth";
+
+function getDrawerMaxWidth() {
+    return Math.min(DRAWER_MAX_WIDTH, Math.floor(window.innerWidth * 0.9));
+}
+
+function setDrawerWidth(width, { persist = false } = {}) {
+    if (window.innerWidth <= 768) {
+        channelDrawer.style.removeProperty("width");
+        return;
+    }
+
+    const maxWidth = getDrawerMaxWidth();
+    const normalized = Math.max(Math.min(Number(width) || 500, maxWidth), Math.min(DRAWER_MIN_WIDTH, maxWidth));
+    state.drawerWidth = normalized;
+    channelDrawer.style.width = `${normalized}px`;
+    if (persist) localStorage.setItem(DRAWER_WIDTH_STORAGE_KEY, String(normalized));
+}
+
+function restoreDrawerWidth() {
+    const saved = Number(localStorage.getItem(DRAWER_WIDTH_STORAGE_KEY));
+    setDrawerWidth(Number.isFinite(saved) && saved > 0 ? saved : 500);
+}
+
+function startDrawerResize(event) {
+    if (window.innerWidth <= 768 || event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = channelDrawer.getBoundingClientRect().width;
+
+    document.body.classList.add("drawer-resizing");
+    const move = (moveEvent) => {
+        setDrawerWidth(startWidth + startX - moveEvent.clientX);
+    };
+    const stop = () => {
+        document.body.classList.remove("drawer-resizing");
+        if (state.drawerWidth) localStorage.setItem(DRAWER_WIDTH_STORAGE_KEY, String(state.drawerWidth));
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+}
+
+function detailMetric(label, value) {
+    return `<div class="detail-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function renderDrawer(details) {
+    const ch = details.channel;
+    const relClass = ch.is_relevant === true ? "relevant" : ch.is_relevant === false ? "not-relevant" : "unmarked";
+    const relLabel = ch.is_relevant === true ? "Relevant" : ch.is_relevant === false ? "Not Relevant" : "Unmarked";
+    const banner = ch.banner_url
+        ? `<img class="drawer-banner" src="${escapeHtml(ch.banner_url)}" alt="" />`
+        : `<div class="drawer-banner drawer-banner-empty"></div>`;
+    const rawTags = ch.channel_tags.length
+        ? ch.channel_tags.map(tag => `<span class="drawer-tag">${escapeHtml(tag)}</span>`).join("")
+        : `<span class="drawer-muted">No channel tags</span>`;
+    const reviewTags = ch.tags.length
+        ? ch.tags.map(tag => `<span class="drawer-tag review-tag">${escapeHtml(tag)}</span>`).join("")
+        : "";
+    const videos = details.videos.length
+        ? details.videos.map(video => {
+            const thumbnail = video.thumbnail_url
+                ? `<img class="video-thumbnail" src="${escapeHtml(video.thumbnail_url)}" alt="" loading="lazy" />`
+                : `<div class="video-thumbnail video-thumbnail-empty"></div>`;
+            const title = escapeHtml(video.title || video.video_id);
+            const videoLink = video.video_url
+                ? `<a class="video-row-link" href="${escapeHtml(video.video_url)}" target="_blank" rel="noopener">${title}</a>`
+                : `<span class="video-row-link">${title}</span>`;
+            return `<article class="drawer-video">
+                ${thumbnail}
+                <div class="video-copy">
+                    ${videoLink}
+                    <span>${fmt(video.view_count)} views · ${fmtDuration(video.duration_seconds)} · ${fmtDate(video.upload_date)}</span>
+                </div>
+            </article>`;
+        }).join("")
+        : `<p class="drawer-muted">No tracked videos yet.</p>`;
+    const encodedUrl = encodeURIComponent(ch.channel_url);
+
+    drawerContent.innerHTML = `
+        <div class="drawer-topbar">
+            <strong>${escapeHtml(ch.channel_name || "Channel")}</strong>
+            <button class="drawer-close" type="button" data-drawer-action="close" title="Close details" aria-label="Close details">×</button>
+        </div>
+        ${banner}
+        <section class="drawer-profile">
+            ${avatarMarkup(ch.avatar_url, ch.channel_name, "drawer-avatar")}
+            <div>
+                <div class="drawer-name">${escapeHtml(ch.channel_name || "Unknown")}${ch.is_verified ? `<span class="verified-badge" title="Verified">✓</span>` : ""}</div>
+                <div class="drawer-handle">${escapeHtml(ch.uploader_id || "")}</div>
+                <div class="drawer-subscribers">${fmt(ch.subscriber_count)} subscribers</div>
+            </div>
+        </section>
+        <div class="drawer-actions">
+            <a class="drawer-channel-link" href="${escapeHtml(ch.uploader_url || ch.channel_url)}" target="_blank" rel="noopener">Open on YouTube</a>
+            <button class="drawer-action-button" type="button" data-drawer-action="edit" data-url="${encodedUrl}">Edit review</button>
+        </div>
+        ${ch.channel_description ? `<p class="drawer-description">${escapeHtml(ch.channel_description).replace(/\n/g, "<br>")}</p>` : ""}
+        <section class="drawer-section">
+            <h3>Tags</h3>
+            <div class="drawer-tags">${rawTags}${reviewTags}</div>
+        </section>
+        <section class="drawer-section">
+            <div class="drawer-section-heading"><h3>Key metrics</h3><span class="relevance-badge ${relClass}">${relLabel}</span></div>
+            <div class="detail-metrics">
+                ${detailMetric("Subscribers", fmt(ch.subscriber_count))}
+                ${detailMetric("Videos", fmt(ch.total_videos_tracked))}
+                ${detailMetric("Hit videos", fmt(ch.hit_videos_count))}
+                ${detailMetric("Avg views", fmtAvg(ch.avg_views_on_channel))}
+                ${detailMetric("Max views", fmt(ch.max_views_on_channel))}
+                ${detailMetric("Last upload", fmtDate(ch.last_upload_date))}
+                ${detailMetric("First upload", fmtDate(ch.first_upload_date))}
+            </div>
+        </section>
+        <section class="drawer-section drawer-videos-section">
+            <div class="drawer-section-heading"><h3>Tracked videos</h3><span>${fmt(details.videos.length)}</span></div>
+            <div class="drawer-video-list">${videos}</div>
+        </section>
+    `;
+}
+
+async function openDetails(encodedUrl) {
+    const channelUrl = decodeURIComponent(encodedUrl);
+    state.drawerChannelUrl = channelUrl;
+    channelDrawer.classList.add("open");
+    drawerBackdrop.classList.add("open");
+    channelDrawer.setAttribute("aria-hidden", "false");
+    drawerContent.innerHTML = `<div class="drawer-loading"><div class="spinner"></div><span>Loading channel details...</span></div>`;
+
+    const params = new URLSearchParams({
+        lang: state.lang,
+        min_views_individual: $("#fMinViewsIndividual").value.trim() || "0",
+    });
+    const maxViews = $("#fMaxViewsIndividual").value.trim();
+    if (maxViews) params.set("max_views_individual", maxViews);
+
+    try {
+        const res = await fetch(`/api/channels/${encodedUrl}/details?${params}`);
+        if (!res.ok) throw new Error("Unable to load channel details");
+        const details = await res.json();
+        if (state.drawerChannelUrl === channelUrl) renderDrawer(details);
+    } catch (err) {
+        drawerContent.innerHTML = `<div class="drawer-loading"><span>Unable to load channel details.</span></div>`;
+        console.error(err);
+    }
 }
 
 function updateBulkActionsUI() {
@@ -335,6 +536,7 @@ $$(".lang-toggle button").forEach(btn => {
     btn.addEventListener("click", () => {
         state.lang = btn.dataset.lang;
         state.page = 1;
+        closeDrawer();
         $$(".lang-toggle button").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
         fetchChannels();
@@ -400,6 +602,31 @@ tbody.addEventListener("click", (e) => {
     if (action === "yes") markRelevance(url, true);
     else if (action === "no") markRelevance(url, false);
     else if (action === "edit") openModal(url);
+    else if (action === "details") openDetails(url);
+});
+
+drawerContent.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-drawer-action]");
+    if (!btn) return;
+    const action = btn.dataset.drawerAction;
+    if (action === "close") closeDrawer();
+    else if (action === "edit") {
+        closeDrawer();
+        openModal(btn.dataset.url);
+    }
+});
+
+drawerBackdrop.addEventListener("click", closeDrawer);
+drawerResizeHandle.addEventListener("pointerdown", startDrawerResize);
+window.addEventListener("resize", () => {
+    if (window.innerWidth <= 768) {
+        channelDrawer.style.removeProperty("width");
+    } else {
+        setDrawerWidth(state.drawerWidth || Number(localStorage.getItem(DRAWER_WIDTH_STORAGE_KEY)) || 500);
+    }
+});
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && channelDrawer.classList.contains("open")) closeDrawer();
 });
 
 // Modal
@@ -522,6 +749,7 @@ btnToggleSidebar.addEventListener("click", () => {
 });
 
 // ── Init ───────────────────────────────────────────────────────────────────
+restoreDrawerWidth();
 updateSortArrows();
 fetchChannels();
 fetchStats();
