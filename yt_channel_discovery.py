@@ -35,6 +35,7 @@ from db import (
 	init_db,
 	is_channel_processed,
 	mark_channel_processed,
+	refresh_channel_stats,
 	upsert_channel_raw,
 	upsert_channel_videos_raw,
 )
@@ -673,6 +674,12 @@ def run(
 					print(f"\n\033[91m[{_utcnow().strftime('%H:%M:%S')}][system] Interrupted by user. Exiting immediately...\033[0m")
 					# Force exit to kill threads immediately
 					os._exit(1)
+
+		if processed:
+			print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][stats] refreshing channel stats...\033[0m")
+			refreshed = bool(db.run(refresh_channel_stats(language)))
+			status = "refreshed" if refreshed else "already refreshing elsewhere"
+			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][stats] {status}\033[0m")
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
 	finally:

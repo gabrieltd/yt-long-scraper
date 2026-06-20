@@ -69,32 +69,35 @@ async def api_channels(
     first_uploaded_before: str | None = Query(None),
     sort_by: str = Query("hit_videos_count"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
-    page: int = Query(1, ge=1),
+    cursor: str | None = Query(None),
     page_size: int = Query(50, ge=1, le=200),
 ):
-    result = await get_filtered_channels(
-        lang,
-        min_views_individual=min_views_individual,
-        max_views_individual=max_views_individual,
-        min_videos_total=min_videos_total,
-        max_videos_total=max_videos_total,
-        min_hits_count=min_hits_count,
-        min_avg_views=min_avg_views,
-        min_subscribers=min_subscribers,
-        max_subscribers=max_subscribers,
-        is_verified=is_verified,
-        channel_name_search=channel_name_search,
-        relevance_filter=relevance_filter,
-        tag_filter=tag_filter,
-        last_uploaded_after=last_uploaded_after,
-        last_uploaded_before=last_uploaded_before,
-        first_uploaded_after=first_uploaded_after,
-        first_uploaded_before=first_uploaded_before,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        page=page,
-        page_size=page_size,
-    )
+    try:
+        result = await get_filtered_channels(
+            lang,
+            min_views_individual=min_views_individual,
+            max_views_individual=max_views_individual,
+            min_videos_total=min_videos_total,
+            max_videos_total=max_videos_total,
+            min_hits_count=min_hits_count,
+            min_avg_views=min_avg_views,
+            min_subscribers=min_subscribers,
+            max_subscribers=max_subscribers,
+            is_verified=is_verified,
+            channel_name_search=channel_name_search,
+            relevance_filter=relevance_filter,
+            tag_filter=tag_filter,
+            last_uploaded_after=last_uploaded_after,
+            last_uploaded_before=last_uploaded_before,
+            first_uploaded_after=first_uploaded_after,
+            first_uploaded_before=first_uploaded_before,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            cursor=cursor,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(result)
 
 

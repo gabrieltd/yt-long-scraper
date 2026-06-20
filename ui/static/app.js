@@ -7,7 +7,10 @@ const state = {
     lang: "es",
     page: 1,
     pageSize: 50,
-    totalPages: 1,
+    currentCursor: null,
+    cursorHistory: [],
+    hasNext: false,
+    nextCursor: null,
     sortBy: "hit_videos_count",
     sortOrder: "desc",
     channels: [],
@@ -100,10 +103,10 @@ function channelVideosUrl(channelUrl) {
 function getFilterParams() {
     const p = new URLSearchParams();
     p.set("lang", state.lang);
-    p.set("page", state.page);
     p.set("page_size", state.pageSize);
     p.set("sort_by", state.sortBy);
     p.set("sort_order", state.sortOrder);
+    if (state.currentCursor) p.set("cursor", state.currentCursor);
 
     const fields = {
         fMinViewsIndividual: "min_views_individual",
@@ -151,11 +154,12 @@ async function fetchChannels() {
     const params = getFilterParams();
     try {
         const res = await fetch(`/api/channels?${params}`);
+        if (!res.ok) throw new Error("Unable to load channels");
         const data = await res.json();
 
         state.channels = data.channels;
-        state.totalPages = data.total_pages;
-        state.page = data.page;
+        state.hasNext = data.has_next;
+        state.nextCursor = data.next_cursor;
 
         renderTable();
         renderPagination();
@@ -244,6 +248,14 @@ function closeDrawer() {
     drawerBackdrop.classList.remove("open");
     channelDrawer.setAttribute("aria-hidden", "true");
     state.drawerChannelUrl = null;
+}
+
+function resetChannelPagination() {
+    state.page = 1;
+    state.currentCursor = null;
+    state.cursorHistory = [];
+    state.hasNext = false;
+    state.nextCursor = null;
 }
 
 const DRAWER_MIN_WIDTH = 400;
@@ -420,9 +432,9 @@ function updateBulkActionsUI() {
 
 // ── Render Pagination ──────────────────────────────────────────────────────
 function renderPagination() {
-    pageInfo.textContent = `Page ${state.page} of ${state.totalPages}`;
+    pageInfo.textContent = `Page ${state.page}`;
     btnPrev.disabled = state.page <= 1;
-    btnNext.disabled = state.page >= state.totalPages;
+    btnNext.disabled = !state.hasNext;
 }
 
 // ── Mark Relevance ─────────────────────────────────────────────────────────
@@ -535,7 +547,7 @@ function updateSortArrows() {
 $$(".lang-toggle button").forEach(btn => {
     btn.addEventListener("click", () => {
         state.lang = btn.dataset.lang;
-        state.page = 1;
+        resetChannelPagination();
         closeDrawer();
         $$(".lang-toggle button").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
@@ -546,7 +558,7 @@ $$(".lang-toggle button").forEach(btn => {
 
 // Apply / Reset
 btnApply.addEventListener("click", () => {
-    state.page = 1;
+    resetChannelPagination();
     fetchChannels();
 });
 
@@ -567,13 +579,24 @@ btnReset.addEventListener("click", () => {
     $("#fChannelName").value = "";
     $("#fRelevance").value = "all";
     $("#fTagFilter").value = "";
-    state.page = 1;
+    resetChannelPagination();
     fetchChannels();
 });
 
 // Pagination
-btnPrev.addEventListener("click", () => { if (state.page > 1) { state.page--; fetchChannels(); } });
-btnNext.addEventListener("click", () => { if (state.page < state.totalPages) { state.page++; fetchChannels(); } });
+btnPrev.addEventListener("click", () => {
+    if (state.page <= 1) return;
+    state.currentCursor = state.cursorHistory.pop() || null;
+    state.page--;
+    fetchChannels();
+});
+btnNext.addEventListener("click", () => {
+    if (!state.hasNext || !state.nextCursor) return;
+    state.cursorHistory.push(state.currentCursor);
+    state.currentCursor = state.nextCursor;
+    state.page++;
+    fetchChannels();
+});
 
 // Sortable headers
 $$("thead th[data-sort]").forEach(th => {
@@ -586,7 +609,7 @@ $$("thead th[data-sort]").forEach(th => {
             state.sortOrder = "desc";
         }
         updateSortArrows();
-        state.page = 1;
+        resetChannelPagination();
         fetchChannels();
     });
 });
@@ -719,7 +742,7 @@ tagsWrapper.addEventListener("click", (e) => {
 // Enter key on filter inputs triggers apply
 $$(".filter-group input, .filter-group select").forEach(el => {
     el.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { state.page = 1; fetchChannels(); }
+        if (e.key === "Enter") { resetChannelPagination(); fetchChannels(); }
     });
 });
 

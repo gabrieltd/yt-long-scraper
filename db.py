@@ -12,6 +12,7 @@ import asyncpg
 
 _DB_POOL: asyncpg.Pool | None = None
 _DB_LANGUAGE: str = "es"  # Track the current language for table naming
+_VALID_LANGUAGES = {"es", "en"}
 
 
 def _utcnow() -> datetime:
@@ -70,6 +71,9 @@ async def create_tables(language: str = "es") -> None:
     Args:
         language: Language suffix for tables ('es' or 'en')
     """
+    if language not in _VALID_LANGUAGES:
+        raise ValueError(f"Unsupported language: {language}")
+
     pool = _require_pool()
     lang_suffix = f"_{language}"
     
@@ -210,6 +214,70 @@ async def create_tables(language: str = "es") -> None:
             );
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_stats_refresh_locks (
+                language TEXT PRIMARY KEY,
+                locked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+
+        await conn.execute("""
+            CREATE OR REPLACE FUNCTION count_channel_views_in_range(
+                view_counts BIGINT[],
+                min_views BIGINT,
+                max_views BIGINT DEFAULT NULL
+            ) RETURNS INTEGER
+            LANGUAGE plpgsql
+            IMMUTABLE
+            PARALLEL SAFE
+            AS $$
+            DECLARE
+                item_count INTEGER := COALESCE(array_length(view_counts, 1), 0);
+                low_index INTEGER := 1;
+                high_index INTEGER;
+                midpoint INTEGER;
+                first_match INTEGER := 0;
+                last_match INTEGER := 0;
+            BEGIN
+                IF item_count = 0 THEN
+                    RETURN 0;
+                END IF;
+
+                high_index := item_count;
+                WHILE low_index <= high_index LOOP
+                    midpoint := (low_index + high_index) / 2;
+                    IF view_counts[midpoint] >= min_views THEN
+                        first_match := midpoint;
+                        high_index := midpoint - 1;
+                    ELSE
+                        low_index := midpoint + 1;
+                    END IF;
+                END LOOP;
+                IF first_match = 0 THEN
+                    RETURN 0;
+                END IF;
+                IF max_views IS NULL THEN
+                    RETURN item_count - first_match + 1;
+                END IF;
+
+                low_index := first_match;
+                high_index := item_count;
+                WHILE low_index <= high_index LOOP
+                    midpoint := (low_index + high_index) / 2;
+                    IF view_counts[midpoint] <= max_views THEN
+                        last_match := midpoint;
+                        low_index := midpoint + 1;
+                    ELSE
+                        high_index := midpoint - 1;
+                    END IF;
+                END LOOP;
+                RETURN GREATEST(last_match - first_match + 1, 0);
+            END
+            $$;
+        """)
+
         # Indices
         indices = [
             f"CREATE INDEX IF NOT EXISTS idx_channel_relevance{lang_suffix}_is_relevant ON channel_relevance{lang_suffix} (is_relevant);",
@@ -221,9 +289,68 @@ async def create_tables(language: str = "es") -> None:
             f"CREATE INDEX IF NOT EXISTS idx_channels_processed{lang_suffix}_processed_at ON channels_processed{lang_suffix} (processed_at);",
             f"CREATE INDEX IF NOT EXISTS idx_channel_videos_raw{lang_suffix}_channel_url ON channel_videos_raw{lang_suffix} (channel_url);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_extracted_at ON channels_raw{lang_suffix} (extracted_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_subscribers ON channels_raw{lang_suffix} (subscriber_count);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_last_upload ON channels_raw{lang_suffix} (last_upload_date);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_first_upload ON channels_raw{lang_suffix} (first_upload_date);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_verified_true ON channels_raw{lang_suffix} (channel_url) WHERE is_verified IS TRUE;",
+            f"CREATE INDEX IF NOT EXISTS idx_channel_relevance{lang_suffix}_tags_gin ON channel_relevance{lang_suffix} USING GIN (tags);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_name_trgm ON channels_raw{lang_suffix} USING GIN (channel_name gin_trgm_ops);",
         ]
         for idx in indices:
             await conn.execute(idx)
+
+        await conn.execute(f"""
+            CREATE MATERIALIZED VIEW IF NOT EXISTS channel_stats{lang_suffix} AS
+            SELECT
+                channel_url,
+                COUNT(*) AS total_videos_tracked,
+                ROUND(AVG(view_count), 2) AS avg_views_on_channel,
+                MAX(view_count) AS max_views_on_channel,
+                ARRAY_AGG(view_count ORDER BY view_count)
+                    FILTER (WHERE view_count IS NOT NULL) AS view_counts
+            FROM channel_videos_raw{lang_suffix}
+            GROUP BY channel_url
+            WITH DATA;
+        """, timeout=600)
+        await conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_stats{lang_suffix}_channel_url "
+            f"ON channel_stats{lang_suffix} (channel_url);"
+        )
+
+
+async def refresh_channel_stats(language: str) -> bool:
+    """Refresh materialized channel statistics after a discovery batch.
+
+    A persisted lease prevents parallel workers from scheduling duplicate refreshes.
+    The lease is intentionally table-backed instead of advisory-lock based so it is
+    safe with the transaction pooler used by the hosted database.
+    """
+    if language not in _VALID_LANGUAGES:
+        raise ValueError(f"Unsupported language: {language}")
+
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        acquired = await conn.fetchval(
+            """
+            INSERT INTO channel_stats_refresh_locks (language, locked_at)
+            VALUES ($1, CURRENT_TIMESTAMP)
+            ON CONFLICT (language) DO UPDATE SET locked_at = EXCLUDED.locked_at
+            WHERE channel_stats_refresh_locks.locked_at < CURRENT_TIMESTAMP - INTERVAL '2 hours'
+            RETURNING language
+            """,
+            language,
+        )
+        if acquired is None:
+            return False
+
+        try:
+            await conn.execute(
+                f"REFRESH MATERIALIZED VIEW CONCURRENTLY channel_stats_{language};",
+                timeout=600,
+            )
+            return True
+        finally:
+            await conn.execute("DELETE FROM channel_stats_refresh_locks WHERE language = $1", language)
 
 
 async def close_db() -> None:
