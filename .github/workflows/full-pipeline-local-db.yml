@@ -1,0 +1,358 @@
+name: Full Pipeline (Local PostgreSQL via Tailscale)
+
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: 'Language/Locale (EN for English, ES for Spanish)'
+        required: false
+        default: 'ES'
+        type: choice
+        options:
+          - 'EN'
+          - 'ES'
+      upload_date:
+        description: 'Filter by upload date'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'last_hour'
+          - 'today'
+          - 'this_week'
+          - 'this_month'
+          - 'this_year'
+      duration:
+        description: 'Filter by video duration'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'under_4'
+          - '4_20'
+          - 'over_20'
+      sort_by:
+        description: 'Sort results by'
+        required: false
+        type: choice
+        options:
+          - ''
+          - 'relevance'
+          - 'upload_date'
+          - 'view_count'
+          - 'rating'
+      reprocess_duplicates:
+        description: 'Reprocess queries that have already been executed'
+        required: false
+        default: false
+        type: boolean
+      max_jobs:
+        description: 'Parallel workers for discovery phases (start low for a local DB)'
+        required: false
+        default: '3'
+        type: string
+
+jobs:
+  prepare-discovery-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      batch_size: ${{ steps.set-matrix.outputs.batch_size }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TAILSCALE_DB_HOST }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check local database before pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: python scripts/check_db_connection.py
+
+      - name: Calculate Discovery Matrix
+        id: set-matrix
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: |
+          MAX_JOBS=${{ inputs.max_jobs }}
+
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            QUERIES_FILE="queries_en.txt"
+          else
+            QUERIES_FILE="queries.txt"
+          fi
+
+          BATCH_SIZE=$(python -c "
+          import math, pathlib
+          lines = [line.strip() for line in pathlib.Path('${QUERIES_FILE}').read_text(encoding='utf-8').splitlines() if line.strip()]
+          print(math.ceil(len(lines) / ${MAX_JOBS}))
+          ")
+
+          CMD="python run_discovery.py --check-batches --batch-size ${BATCH_SIZE}"
+          if [ "${{ inputs.language }}" = "EN" ]; then CMD="$CMD --EN"; else CMD="$CMD --ES"; fi
+          if [ "${{ inputs.reprocess_duplicates }}" = "true" ]; then CMD="$CMD --reprocess-duplicates"; fi
+
+          $CMD > matrix.json
+          MATRIX_JSON=$(cat matrix.json)
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "batch_size=${BATCH_SIZE}" >> "$GITHUB_OUTPUT"
+
+  discovery:
+    needs: prepare-discovery-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        batch_index: ${{ fromJson(needs.prepare-discovery-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TAILSCALE_DB_HOST }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-discovery.txt
+          playwright install chromium
+
+      - name: Check local database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: python scripts/check_db_connection.py
+
+      - name: Run Discovery Batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: |
+          CMD="python run_discovery.py --batch-size ${{ needs.prepare-discovery-matrix.outputs.batch_size }} --batch-index ${{ matrix.batch_index }}"
+          if [ "${{ inputs.language }}" = "EN" ]; then CMD="$CMD --EN"; else CMD="$CMD --ES"; fi
+          if [ "${{ inputs.reprocess_duplicates }}" = "true" ]; then CMD="$CMD --reprocess-duplicates"; fi
+          if [ -n "${{ inputs.upload_date }}" ]; then CMD="$CMD --upload-date ${{ inputs.upload_date }}"; fi
+          if [ -n "${{ inputs.duration }}" ]; then CMD="$CMD --duration ${{ inputs.duration }}"; fi
+          if [ -n "${{ inputs.sort_by }}" ]; then CMD="$CMD --sort-by ${{ inputs.sort_by }}"; fi
+          echo "Running: $CMD"
+          $CMD
+
+  normalization:
+    needs: discovery
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TAILSCALE_DB_HOST }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check local database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: python scripts/check_db_connection.py
+
+      - name: Run Normalization & Validation
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: |
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            python yt_normalization_validation.py --EN
+          else
+            python yt_normalization_validation.py --ES
+          fi
+
+  prepare-channel-matrix:
+    needs: normalization
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      channels_per_job: ${{ steps.set-matrix.outputs.channels_per_job }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TAILSCALE_DB_HOST }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check local database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: python scripts/check_db_connection.py
+
+      - name: Calculate Channel Matrix
+        id: set-matrix
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: |
+          MAX_JOBS=${{ inputs.max_jobs }}
+          PENDING=$(python - <<'EOF'
+          import asyncio
+          import sys
+
+          sys.path.insert(0, ".")
+          import db
+
+          language = "en" if "${{ inputs.language }}" == "EN" else "es"
+
+          async def count_pending():
+              await db.init_db(language=language)
+              row = await db._DB_POOL.fetchrow(
+                  """
+                  SELECT COUNT(DISTINCT vn.channel_url) AS pending_channels
+                  FROM videos_normalized_{lang} vn
+                  LEFT JOIN channels_processed_{lang} cp ON vn.channel_url = cp.channel_url
+                  LEFT JOIN channels_discovery_claims_{lang} cdc ON vn.channel_url = cdc.channel_url
+                  WHERE vn.validation_passed IS TRUE
+                    AND vn.channel_url IS NOT NULL
+                    AND cp.channel_url IS NULL
+                    AND cdc.channel_url IS NULL
+                  """.replace("{lang}", language)
+              )
+              await db.close_db()
+              return row["pending_channels"] if row else 0
+
+          print(asyncio.run(count_pending()))
+          EOF
+          )
+
+          if [ "$PENDING" -le 0 ]; then
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            echo "channels_per_job=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANNELS_PER_JOB=$(python -c "import math; print(math.ceil(${PENDING} / ${MAX_JOBS}))")
+          MATRIX_JSON=$(python -c "import json; print(json.dumps(list(range(${MAX_JOBS}))))")
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "channels_per_job=$CHANNELS_PER_JOB" >> "$GITHUB_OUTPUT"
+
+  channel-discovery:
+    needs: prepare-channel-matrix
+    if: ${{ !cancelled() && needs.prepare-channel-matrix.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job_index: ${{ fromJson(needs.prepare-channel-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TAILSCALE_DB_HOST }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies and vendored yt-dlp
+        run: |
+          python -m pip install -r requirements-channel.txt
+          python -m pip install -e "./yt-dlp/yt-dlp[default]"
+
+      - name: Verify vendored yt-dlp
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yt_dlp
+
+          root = (Path.cwd() / "yt-dlp" / "yt-dlp").resolve()
+          path = Path(yt_dlp.__file__).resolve()
+          print(f"yt_dlp path: {path}")
+          if root not in path.parents:
+              raise SystemExit(f"Expected vendored yt_dlp under {root}, got {path}")
+          PY
+
+      - name: Check local database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: python scripts/check_db_connection.py
+
+      - name: Run Channel Discovery
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: |
+          CMD="python yt_channel_discovery.py --limit-channels ${{ needs.prepare-channel-matrix.outputs.channels_per_job }}"
+          if [ "${{ inputs.language }}" = "EN" ]; then CMD="$CMD --EN"; else CMD="$CMD --ES"; fi
+          echo "Starting job ${{ matrix.job_index }}: $CMD"
+          $CMD
+
+  verify-local-database:
+    needs:
+      - prepare-discovery-matrix
+      - discovery
+      - normalization
+      - prepare-channel-matrix
+      - channel-discovery
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TAILSCALE_DB_HOST }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check local database after pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_LOCAL }}
+        run: python scripts/check_db_connection.py
