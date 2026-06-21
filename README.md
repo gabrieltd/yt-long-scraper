@@ -30,10 +30,10 @@ Dependencias principales (ver [requirements.txt](requirements.txt)):
 ### 1) Levantar Postgres (Docker)
 
 ```bash
-docker compose --env-file infra/local-db/.env -f infra/local-db/docker-compose.yml up -d
+docker compose up -d
 ```
 
-Para una base local con Docker y acceso opcional y restringido desde GitHub Actions mediante Tailscale, sigue [la guia de PostgreSQL local](infra/local-db/README.md). Mantiene `DATABASE_URL` como unica configuracion de conexion y no reemplaza los workflows actuales de Supabase.
+Esto usa [docker-compose.yaml](docker-compose.yaml) y expone Postgres en `localhost:5432`.
 
 ### 2) Configurar variables de entorno
 
@@ -139,8 +139,6 @@ Ver [BILINGUAL_USAGE.md](BILINGUAL_USAGE.md) para guía completa de uso.
 - [Flujo del pipeline](docs/FLUJO.md)
 - [Base de datos (tablas)](docs/BASE_DE_DATOS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [PostgreSQL local con Docker y Tailscale](infra/local-db/README.md)
-- [Guia desde cero de Tailscale](infra/local-db/TAILSCALE_SETUP.md)
 
 ## Notas importantes
 

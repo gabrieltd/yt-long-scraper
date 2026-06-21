@@ -97,7 +97,6 @@ celerybeat.pid
 
 # Environments
 .env
-.env.local
 .venv
 env/
 venv/
@@ -136,8 +135,3 @@ Thumbs.db
 # Project specific
 config.json
 credentials.json
-
-# Local PostgreSQL infrastructure and database exports
-infra/local-db/.env
-*.dump
-*.backup
