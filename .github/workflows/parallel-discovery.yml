@@ -65,14 +65,20 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-      
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
       - name: Calculate Matrix
         id: set-matrix
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          pip install -r requirements.txt
-          
           # Build command with language flag
           CMD="python run_discovery.py --check-batches --batch-size ${{ inputs.batch_size }}"
           
@@ -117,6 +123,11 @@ jobs:
         run: |
           pip install -r requirements-discovery.txt
           playwright install chromium
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
 
       - name: Run Discovery Batch
         env:

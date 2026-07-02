@@ -82,6 +82,11 @@ jobs:
               raise SystemExit(f"Expected vendored yt_dlp under {root}, got {path}")
           PY
 
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
       - name: Run Channel Discovery
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

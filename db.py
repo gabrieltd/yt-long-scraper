@@ -373,6 +373,23 @@ def _get_table_name(base_name: str) -> str:
     return f"{base_name}_{_DB_LANGUAGE}"
 
 
+async def purge_pipeline_staging_tables(language: str | None = None) -> list[str]:
+    """Truncate pipeline staging tables for one language and return table names."""
+    lang = language or _DB_LANGUAGE
+    if lang not in _VALID_LANGUAGES:
+        raise ValueError(f"Unsupported language: {lang}")
+
+    pool = _require_pool()
+    tables = [
+        f"videos_normalized_{lang}",
+        f"videos_raw_{lang}",
+        f"search_runs_{lang}",
+        f"channels_discovery_claims_{lang}",
+    ]
+    await pool.execute(f"TRUNCATE TABLE {', '.join(tables)};")
+    return tables
+
+
 # Helper to handle datetime types for asyncpg (it expects datetime objects, not strings)
 def _ensure_datetime(dt: datetime | str | None) -> datetime | None:
     if dt is None:

@@ -72,13 +72,19 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
       - name: Calculate Discovery Matrix
         id: set-matrix
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          pip install -r requirements.txt
-
           MAX_JOBS=${{ inputs.max_jobs }}
 
           # Count total queries in the file (pure Python, no DB needed)
@@ -141,6 +147,11 @@ jobs:
           pip install -r requirements-discovery.txt
           playwright install chromium
 
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
       - name: Run Discovery Batch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -192,6 +203,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
       - name: Run Normalization & Validation
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -225,6 +241,11 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
 
       - name: Calculate Channel Matrix
         id: set-matrix
@@ -327,6 +348,11 @@ jobs:
           if root not in path.parents:
               raise SystemExit(f"Expected vendored yt_dlp under {root}, got {path}")
           PY
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
 
       - name: Run Channel Discovery
         env:

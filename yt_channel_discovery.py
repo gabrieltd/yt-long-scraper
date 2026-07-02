@@ -35,6 +35,7 @@ from db import (
 	init_db,
 	is_channel_processed,
 	mark_channel_processed,
+	purge_pipeline_staging_tables,
 	refresh_channel_stats,
 	upsert_channel_raw,
 	upsert_channel_videos_raw,
@@ -680,6 +681,10 @@ def run(
 			refreshed = bool(db.run(refresh_channel_stats(language)))
 			status = "refreshed" if refreshed else "already refreshing elsewhere"
 			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][stats] {status}\033[0m")
+
+		print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] truncating pipeline staging tables for language={language}...\033[0m")
+		purged_tables = db.run(purge_pipeline_staging_tables(language))
+		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
 	finally:

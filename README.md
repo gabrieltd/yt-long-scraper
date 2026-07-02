@@ -33,13 +33,16 @@ Dependencias principales (ver [requirements.txt](requirements.txt)):
 docker compose up -d
 ```
 
-Esto usa [docker-compose.yaml](docker-compose.yaml) y expone Postgres en `localhost:5432`.
+Esto usa [docker-compose.yml](docker-compose.yml) y expone Postgres en `localhost:5432`.
 
 ### 2) Configurar variables de entorno
 
 Crea un `.env` (puedes copiar [`.env.example`](.env.example)). Variable clave:
 
 - `DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_discovery`
+
+Si cambias `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` o `POSTGRES_PORT`,
+mantén `DATABASE_URL` sincronizada con esos valores.
 
 ### 3) Instalar dependencias
 
@@ -135,6 +138,7 @@ Ver [BILINGUAL_USAGE.md](BILINGUAL_USAGE.md) para guía completa de uso.
 ## Documentación
 
 - **[Uso Bilingüe y Filtros](BILINGUAL_USAGE.md)** ⭐ Nuevo
+- [PostgreSQL local via ngrok TCP for GitHub Actions](docs/NGROK_POSTGRES_GITHUB_ACTIONS.md)
 - [Configuración y ejecución](docs/CONFIGURACION.md)
 - [Flujo del pipeline](docs/FLUJO.md)
 - [Base de datos (tablas)](docs/BASE_DE_DATOS.md)
