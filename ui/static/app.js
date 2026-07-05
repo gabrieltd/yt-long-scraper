@@ -11,7 +11,7 @@ const state = {
     cursorHistory: [],
     hasNext: false,
     nextCursor: null,
-    sortBy: "channel_name",
+    sortBy: "hit_videos_count",
     sortOrder: "desc",
     channels: [],
     // Modal
@@ -71,6 +71,17 @@ function fmtDate(yyyymmdd) {
     return `${y}-${m}-${d}`;
 }
 
+function fmtDuration(seconds) {
+    if (seconds == null || !Number.isFinite(Number(seconds))) return "–";
+    const total = Math.max(0, Math.floor(Number(seconds)));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+        : `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
 function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>'"]/g, char => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
@@ -98,6 +109,12 @@ function getFilterParams() {
     if (state.currentCursor) p.set("cursor", state.currentCursor);
 
     const fields = {
+        fMinViewsIndividual: "min_views_individual",
+        fMaxViewsIndividual: "max_views_individual",
+        fMinVideosTotal: "min_videos_total",
+        fMaxVideosTotal: "max_videos_total",
+        fMinHitsCount: "min_hits_count",
+        fMinAvgViews: "min_avg_views",
         fMinSubscribers: "min_subscribers",
         fMaxSubscribers: "max_subscribers",
         fChannelName: "channel_name_search",
@@ -132,7 +149,7 @@ function getFilterParams() {
 
 // ── Fetch Channels ─────────────────────────────────────────────────────────
 async function fetchChannels() {
-    tbody.innerHTML = `<tr><td colspan="7" class="loading"><div class="spinner"></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="loading"><div class="spinner"></div></td></tr>`;
 
     const params = getFilterParams();
     try {
@@ -147,7 +164,7 @@ async function fetchChannels() {
         renderTable();
         renderPagination();
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="7" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="empty-state"><div class="icon">⚠️</div>Error loading channels</td></tr>`;
         console.error(err);
     }
 }
@@ -169,7 +186,7 @@ async function fetchStats() {
 // ── Render Table ───────────────────────────────────────────────────────────
 function renderTable() {
     if (state.channels.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="empty-state"><div class="icon">📭</div>No channels match your filters</td></tr>`;
         updateBulkActionsUI();
         return;
     }
@@ -206,6 +223,10 @@ function renderTable() {
                 </span>
             </td>
             <td class="num">${fmt(ch.subscriber_count)}</td>
+            <td class="num">${fmt(ch.total_videos_tracked)}</td>
+            <td class="num">${fmt(ch.hit_videos_count)}</td>
+            <td class="num">${fmtAvg(ch.avg_views_on_channel)}</td>
+            <td class="num">${fmt(ch.max_views_on_channel)}</td>
             <td class="num date-cell">${fmtDate(ch.last_upload_date)}</td>
             <td class="num date-cell">${fmtDate(ch.first_upload_date)}</td>
             <td><span class="relevance-badge ${relClass}">${relLabel}</span>${tagsHtml}</td>
@@ -301,6 +322,24 @@ function renderDrawer(details) {
     const reviewTags = ch.tags.length
         ? ch.tags.map(tag => `<span class="drawer-tag review-tag">${escapeHtml(tag)}</span>`).join("")
         : "";
+    const videos = details.videos.length
+        ? details.videos.map(video => {
+            const thumbnail = video.thumbnail_url
+                ? `<img class="video-thumbnail" src="${escapeHtml(video.thumbnail_url)}" alt="" loading="lazy" />`
+                : `<div class="video-thumbnail video-thumbnail-empty"></div>`;
+            const title = escapeHtml(video.title || video.video_id);
+            const videoLink = video.video_url
+                ? `<a class="video-row-link" href="${escapeHtml(video.video_url)}" target="_blank" rel="noopener">${title}</a>`
+                : `<span class="video-row-link">${title}</span>`;
+            return `<article class="drawer-video">
+                ${thumbnail}
+                <div class="video-copy">
+                    ${videoLink}
+                    <span>${fmt(video.view_count)} views · ${fmtDuration(video.duration_seconds)} · ${fmtDate(video.upload_date)}</span>
+                </div>
+            </article>`;
+        }).join("")
+        : `<p class="drawer-muted">No tracked videos yet.</p>`;
     const encodedUrl = encodeURIComponent(ch.channel_url);
 
     drawerContent.innerHTML = `
@@ -321,18 +360,26 @@ function renderDrawer(details) {
             <a class="drawer-channel-link" href="${escapeHtml(ch.uploader_url || ch.channel_url)}" target="_blank" rel="noopener">Open on YouTube</a>
             <button class="drawer-action-button" type="button" data-drawer-action="edit" data-url="${encodedUrl}">Edit review</button>
         </div>
+        <section class="drawer-section drawer-videos-section">
+            <div class="drawer-section-heading"><h3>Tracked videos</h3><span>${fmt(details.videos.length)}</span></div>
+            <div class="drawer-video-list">${videos}</div>
+        </section>
+        <section class="drawer-section">
+            <div class="drawer-section-heading"><h3>Key metrics</h3><span class="relevance-badge ${relClass}">${relLabel}</span></div>
+            <div class="detail-metrics">
+                ${detailMetric("Subscribers", fmt(ch.subscriber_count))}
+                ${detailMetric("Videos", fmt(ch.total_videos_tracked))}
+                ${detailMetric("Hit videos", fmt(ch.hit_videos_count))}
+                ${detailMetric("Avg views", fmtAvg(ch.avg_views_on_channel))}
+                ${detailMetric("Max views", fmt(ch.max_views_on_channel))}
+                ${detailMetric("Last upload", fmtDate(ch.last_upload_date))}
+                ${detailMetric("First upload", fmtDate(ch.first_upload_date))}
+            </div>
+        </section>
         ${ch.channel_description ? `<p class="drawer-description">${escapeHtml(ch.channel_description).replace(/\n/g, "<br>")}</p>` : ""}
         <section class="drawer-section">
             <h3>Tags</h3>
             <div class="drawer-tags">${rawTags}${reviewTags}</div>
-        </section>
-        <section class="drawer-section">
-            <div class="drawer-section-heading"><h3>Channel info</h3><span class="relevance-badge ${relClass}">${relLabel}</span></div>
-            <div class="detail-metrics">
-                ${detailMetric("Subscribers", fmt(ch.subscriber_count))}
-                ${detailMetric("Last upload", fmtDate(ch.last_upload_date))}
-                ${detailMetric("First upload", fmtDate(ch.first_upload_date))}
-            </div>
         </section>
     `;
 }
@@ -345,7 +392,12 @@ async function openDetails(encodedUrl) {
     channelDrawer.setAttribute("aria-hidden", "false");
     drawerContent.innerHTML = `<div class="drawer-loading"><div class="spinner"></div><span>Loading channel details...</span></div>`;
 
-    const params = new URLSearchParams({ lang: state.lang });
+    const params = new URLSearchParams({
+        lang: state.lang,
+        min_views_individual: $("#fMinViewsIndividual").value.trim() || "0",
+    });
+    const maxViews = $("#fMaxViewsIndividual").value.trim();
+    if (maxViews) params.set("max_views_individual", maxViews);
 
     try {
         const res = await fetch(`/api/channels/${encodedUrl}/details?${params}`);
@@ -511,6 +563,12 @@ btnApply.addEventListener("click", () => {
 });
 
 btnReset.addEventListener("click", () => {
+    $("#fMinViewsIndividual").value = "10000";
+    $("#fMaxViewsIndividual").value = "";
+    $("#fMinVideosTotal").value = "3";
+    $("#fMaxVideosTotal").value = "";
+    $("#fMinHitsCount").value = "1";
+    $("#fMinAvgViews").value = "5000";
     $("#fMinSubscribers").value = "";
     $("#fMaxSubscribers").value = "";
     $("#fLastUploadedAfter").value = "";

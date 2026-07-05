@@ -1,7 +1,9 @@
 """Manually compact the DB to marked channels and minimum UI data.
 
 This script is intentionally not wired into the pipeline. It keeps marked
-channel metadata/relevance and removes derived stats plus raw video data.
+channel metadata/relevance and preserves channel_stats_* as an existing snapshot.
+Do not refresh channel_stats_* after this purge unless you accept losing the
+historical metrics that came from channel_videos_raw_*.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ class PurgeCounts:
     relevance_null_rows: int
     channels_processed: int
     unmarked_channels_processed: int
-    channel_stats_rows: int | None
+    channel_stats_rows: int
     channel_videos_raw: int
     videos_normalized: int
     videos_raw: int
@@ -68,16 +70,6 @@ def _vacuum_tables(language: str) -> list[str]:
 async def _count(conn: asyncpg.Connection, sql: str) -> int:
     value = await conn.fetchval(sql)
     return int(value or 0)
-
-
-async def _relation_exists(conn: asyncpg.Connection, name: str) -> bool:
-    return bool(await conn.fetchval("SELECT to_regclass($1)", name))
-
-
-async def _count_relation(conn: asyncpg.Connection, name: str) -> int | None:
-    if not await _relation_exists(conn, name):
-        return None
-    return await _count(conn, f"SELECT COUNT(*) FROM {name}")
 
 
 async def collect_counts(conn: asyncpg.Connection, language: str) -> PurgeCounts:
@@ -129,7 +121,7 @@ async def collect_counts(conn: asyncpg.Connection, language: str) -> PurgeCounts
             WHERE NOT EXISTS ({marked_exists.format(alias="cp")})
             """,
         ),
-        channel_stats_rows=await _count_relation(conn, channel_stats),
+        channel_stats_rows=await _count(conn, f"SELECT COUNT(*) FROM {channel_stats}"),
         channel_videos_raw=await _count(conn, f"SELECT COUNT(*) FROM {channel_videos_raw}"),
         videos_normalized=await _count(conn, f"SELECT COUNT(*) FROM {videos_normalized}"),
         videos_raw=await _count(conn, f"SELECT COUNT(*) FROM {videos_raw}"),
@@ -145,7 +137,6 @@ async def purge_unmarked_data(conn: asyncpg.Connection, language: str) -> None:
     channels_raw = _table("channels_raw", language)
     channel_relevance = _table("channel_relevance", language)
     channels_processed = _table("channels_processed", language)
-    channel_stats = _table("channel_stats", language)
     truncate_tables = ", ".join(_tables_to_truncate(language))
 
     marked_exists = (
@@ -169,7 +160,6 @@ async def purge_unmarked_data(conn: asyncpg.Connection, language: str) -> None:
             """
         )
         await conn.execute(f"TRUNCATE TABLE {truncate_tables};")
-        await conn.execute(f"DROP MATERIALIZED VIEW IF EXISTS {channel_stats};")
 
 
 async def vacuum_full(conn: asyncpg.Connection, language: str) -> None:
@@ -188,8 +178,7 @@ def print_counts(title: str, counts: PurgeCounts) -> None:
     print(f"channel_relevance null rows to delete: {counts.relevance_null_rows}")
     print(f"channels_processed: {counts.channels_processed}")
     print(f"channels_processed to delete: {counts.unmarked_channels_processed}")
-    stats_rows = "missing" if counts.channel_stats_rows is None else counts.channel_stats_rows
-    print(f"channel_stats rows to drop: {stats_rows}")
+    print(f"channel_stats snapshot rows kept: {counts.channel_stats_rows}")
     print(f"channel_videos_raw to truncate: {counts.channel_videos_raw}")
     print(f"videos_normalized to truncate: {counts.videos_normalized}")
     print(f"videos_raw to truncate: {counts.videos_raw}")
@@ -244,7 +233,10 @@ async def async_main(args: argparse.Namespace) -> int:
         language = args.language
         before = await collect_counts(conn, language)
         print_counts(f"Before purge ({language})", before)
-        print("\nNote: channel_stats is removed because derived metrics are no longer valid.")
+        print(
+            "\nNote: channel_stats remains as a snapshot. Do not refresh it after "
+            "this purge unless you accept losing historical metrics."
+        )
 
         if args.dry_run:
             print("\nDry run only. No data was changed.")

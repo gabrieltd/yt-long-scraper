@@ -67,7 +67,7 @@ async def api_channels(
     last_uploaded_before: str | None = Query(None),
     first_uploaded_after: str | None = Query(None),
     first_uploaded_before: str | None = Query(None),
-    sort_by: str = Query("channel_name"),
+    sort_by: str = Query("hit_videos_count"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     cursor: str | None = Query(None),
     page_size: int = Query(50, ge=1, le=200),

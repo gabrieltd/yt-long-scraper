@@ -19,7 +19,10 @@ VALID_LANGUAGES = ("es", "en")
 VALID_SORT_COLUMNS = {
     "channel_name",
     "subscriber_count",
-    "is_verified",
+    "total_videos_tracked",
+    "hit_videos_count",
+    "avg_views_on_channel",
+    "max_views_on_channel",
     "is_relevant",
     "last_upload_date",
     "first_upload_date",
@@ -110,18 +113,18 @@ async def get_filtered_channels(
     last_uploaded_before: str | None = None,
     first_uploaded_after: str | None = None,
     first_uploaded_before: str | None = None,
-    sort_by: str = "channel_name",
+    sort_by: str = "hit_videos_count",
     sort_order: str = "desc",
     cursor: str | None = None,
     page_size: int = 50,
 ) -> dict[str, Any]:
-    """Return one keyset-paginated channel page backed by persisted review data."""
+    """Return one keyset-paginated channel page backed by materialized stats."""
     lang = _validate_lang(lang)
     pool = _require_pool()
     page_size = max(1, min(page_size, 200))
 
     if sort_by not in VALID_SORT_COLUMNS:
-        sort_by = "channel_name"
+        sort_by = "hit_videos_count"
     sort_order = "ASC" if sort_order.lower() == "asc" else "DESC"
 
     params: list[Any] = []
@@ -133,7 +136,19 @@ async def get_filtered_channels(
         params.append(value)
         return f"${index}"
 
-    where_clauses = []
+    min_views_param = _next(min_views_individual)
+    max_views_param = _next(max_views_individual)
+    hit_expression = (
+        f"count_channel_views_in_range(stats.view_counts, {min_views_param}, {max_views_param})"
+    )
+
+    where_clauses = [
+        f"total_videos_tracked >= {_next(min_videos_total)}",
+        f"hit_videos_count >= {_next(min_hits_count)}",
+        f"avg_views_on_channel >= {_next(min_avg_views)}",
+    ]
+    if max_videos_total is not None:
+        where_clauses.append(f"total_videos_tracked <= {_next(max_videos_total)}")
     if min_subscribers is not None:
         where_clauses.append(f"subscriber_count >= {_next(min_subscribers)}")
     if max_subscribers is not None:
@@ -165,6 +180,8 @@ async def get_filtered_channels(
             where_clauses.append(f"({sort_by} IS NULL AND channel_url > {_next(cursor_channel_url)})")
         else:
             cursor_value_param = _next(cursor_value)
+            if sort_by == "avg_views_on_channel":
+                cursor_value_param = f"{cursor_value_param}::NUMERIC"
             cursor_url_param = _next(cursor_channel_url)
             comparator = "<" if sort_order == "DESC" else ">"
             where_clauses.append(
@@ -184,11 +201,16 @@ async def get_filtered_channels(
                 cr.is_verified,
                 cr.last_upload_date,
                 cr.first_upload_date,
+                stats.total_videos_tracked,
+                {hit_expression} AS hit_videos_count,
+                stats.avg_views_on_channel,
+                stats.max_views_on_channel,
                 rel.is_relevant,
                 rel.notes,
                 rel.tags,
                 rel.marked_at
             FROM channels_raw_{lang} cr
+            JOIN channel_stats_{lang} stats ON cr.channel_url = stats.channel_url
             LEFT JOIN channel_relevance_{lang} rel ON cr.channel_url = rel.channel_url
         )
         SELECT *
@@ -212,6 +234,10 @@ async def get_filtered_channels(
             "is_verified": row["is_verified"],
             "last_upload_date": row["last_upload_date"],
             "first_upload_date": row["first_upload_date"],
+            "total_videos_tracked": row["total_videos_tracked"],
+            "hit_videos_count": row["hit_videos_count"],
+            "avg_views_on_channel": float(row["avg_views_on_channel"]) if row["avg_views_on_channel"] is not None else 0,
+            "max_views_on_channel": row["max_views_on_channel"],
             "is_relevant": row["is_relevant"],
             "notes": row["notes"],
             "tags": list(row["tags"]) if row["tags"] else [],
@@ -234,7 +260,7 @@ async def get_channel_details(
     min_views_individual: int = 0,
     max_views_individual: int | None = None,
 ) -> dict[str, Any] | None:
-    """Return persisted channel metadata and review data."""
+    """Return persisted channel metadata, current stats, and tracked videos."""
     lang = _validate_lang(lang)
     pool = _require_pool()
 
@@ -253,21 +279,35 @@ async def get_channel_details(
             cr.uploader_url,
             cr.last_upload_date,
             cr.first_upload_date,
+            stats.total_videos_tracked,
+            count_channel_views_in_range(stats.view_counts, $2, $3) AS hit_videos_count,
+            stats.avg_views_on_channel,
+            stats.max_views_on_channel,
             rel.is_relevant,
             rel.notes,
             rel.tags
         FROM channels_raw_{lang} cr
+        JOIN channel_stats_{lang} stats ON stats.channel_url = cr.channel_url
         LEFT JOIN channel_relevance_{lang} rel ON rel.channel_url = cr.channel_url
         WHERE cr.channel_url = $1
+    """
+    videos_sql = f"""
+        SELECT video_id, title, video_url, thumbnail_url, upload_date, duration_seconds, view_count
+        FROM channel_videos_raw_{lang}
+        WHERE channel_url = $1
+        ORDER BY upload_date DESC NULLS LAST, view_count DESC NULLS LAST
     """
 
     async with pool.acquire() as conn:
         channel_row = await conn.fetchrow(
             channel_sql,
             channel_url,
+            min_views_individual,
+            max_views_individual,
         )
         if channel_row is None:
             return None
+        video_rows = await conn.fetch(videos_sql, channel_url)
 
     channel = {
         "channel_url": channel_row["channel_url"],
@@ -283,11 +323,27 @@ async def get_channel_details(
         "uploader_url": channel_row["uploader_url"],
         "last_upload_date": channel_row["last_upload_date"],
         "first_upload_date": channel_row["first_upload_date"],
+        "total_videos_tracked": channel_row["total_videos_tracked"],
+        "hit_videos_count": channel_row["hit_videos_count"],
+        "avg_views_on_channel": float(channel_row["avg_views_on_channel"]) if channel_row["avg_views_on_channel"] is not None else 0,
+        "max_views_on_channel": channel_row["max_views_on_channel"],
         "is_relevant": channel_row["is_relevant"],
         "notes": channel_row["notes"],
         "tags": list(channel_row["tags"]) if channel_row["tags"] else [],
     }
-    return {"channel": channel, "videos": []}
+    videos = [
+        {
+            "video_id": row["video_id"],
+            "title": row["title"],
+            "video_url": row["video_url"],
+            "thumbnail_url": row["thumbnail_url"],
+            "upload_date": row["upload_date"],
+            "duration_seconds": row["duration_seconds"],
+            "view_count": row["view_count"],
+        }
+        for row in video_rows
+    ]
+    return {"channel": channel, "videos": videos}
 
 
 # ─── Set relevance ─────────────────────────────────────────────────────────

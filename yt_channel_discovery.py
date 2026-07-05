@@ -301,7 +301,7 @@ def fetch_rss_dates(
 def run_ytdlp_channel_dump(
 	channel_url: str,
 	*,
-	max_videos: int = 40,
+	max_videos: int = 60,
 	timeout_seconds: int = 180,
 ) -> dict[str, Any]:
 	"""Run yt-dlp for a channel URL and return the parsed JSON.
@@ -446,7 +446,7 @@ def parse_channel_videos_raw(
 	channel_url: str,
 	dump: dict[str, Any],
 	*,
-	max_videos: int = 40,
+	max_videos: int = 60,
 ) -> list[dict[str, Any]]:
 	"""Extract last-N videos from a yt-dlp dump (flat playlist entries)."""
 	raw_entries = dump.get("entries")
@@ -508,7 +508,7 @@ def process_one_channel(
 	channel_url: str,
 	db: _DBRunner,
 	*,
-	max_videos: int = 40,
+	max_videos: int = 60,
 	timeout_seconds: int = 180,
 	# Note: DB operations are executed on the db runner loop.
 ) -> tuple[str, str]:
@@ -588,7 +588,7 @@ Returns:
 		return (channel_url, "processed")
 	except Exception as e:
 		msg = str(e)
-		# Detect permanent failures (404 / channel gone / blocking).
+		# Detect permanent failures (604 / channel gone / blocking).
 		# "Failed to resolve url" is typical for 404 or deleted channels in yt-dlp.
 		# "HTTP Error 404" is explicit.
 		if "Failed to resolve url" in msg or "HTTP Error 404" in msg or "does the playlist exist" in msg:
@@ -702,7 +702,7 @@ def run(
 def _build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="YouTube channel enrichment (yt-dlp, no analysis)")
 	p.add_argument("--limit-channels", type=int, default=None, help="Max channels to process (default: no limit)")
-	p.add_argument("--max-videos", type=int, default=40)
+	p.add_argument("--max-videos", type=int, default=60)
 	p.add_argument("--timeout-seconds", type=int, default=180)
 	p.add_argument(
 		"--dsn",
