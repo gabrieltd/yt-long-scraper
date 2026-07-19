@@ -16,17 +16,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
 import threading
+import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from concurrent.futures import (
+	ProcessPoolExecutor,
+	ThreadPoolExecutor,
+	TimeoutError as FutureTimeoutError,
+	as_completed,
+)
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.request import urlopen, Request
-from urllib.error import URLError
+
+import requests
 from dotenv import load_dotenv
 
 from youtube_oldest_video import (
@@ -35,6 +42,7 @@ from youtube_oldest_video import (
 	OldestVideoError,
 	YouTubeOldestVideoClient,
 	fetch_first_video_with_ytdlp,
+	terminate_active_fallback_processes,
 )
 
 from db import (
@@ -43,10 +51,11 @@ from db import (
 	init_db,
 	is_channel_processed,
 	mark_channel_processed,
+	persist_channel_discovery_result,
 	purge_pipeline_staging_tables,
+	release_channel_discovery_claim,
+	release_channel_discovery_claims,
 	refresh_channel_stats,
-	upsert_channel_raw,
-	upsert_channel_videos_raw,
 )
 
 
@@ -60,12 +69,15 @@ MAX_WORKERS = 6
 
 
 # Number of channels to claim per DB round-trip.
-DISCOVERY_BATCH_SIZE = 500
+DEFAULT_CLAIM_STALE_MINUTES = 60
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_YTDLP_ROOT = PROJECT_ROOT / "yt-dlp" / "yt-dlp"
 LOCAL_YTDLP_MAIN = LOCAL_YTDLP_ROOT / "yt_dlp" / "__main__.py"
+_STOP_EVENT = threading.Event()
+_ACTIVE_YTDLP_LOCK = threading.Lock()
+_ACTIVE_YTDLP_PROCESSES: set[subprocess.Popen[str]] = set()
 
 
 def _local_ytdlp_env() -> dict[str, str]:
@@ -84,6 +96,85 @@ def _local_ytdlp_env() -> dict[str, str]:
 		else os.pathsep.join([str(LOCAL_YTDLP_ROOT), pythonpath])
 	)
 	return env
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+	"""Terminate one child process created by this module."""
+	if process.poll() is not None:
+		return
+	try:
+		if os.name == "nt":
+			subprocess.run(
+				["taskkill", "/PID", str(process.pid), "/T", "/F"],
+				stdout=subprocess.DEVNULL,
+				stderr=subprocess.DEVNULL,
+				check=False,
+				timeout=5,
+			)
+		else:
+			process.terminate()
+			try:
+				process.wait(timeout=3)
+			except subprocess.TimeoutExpired:
+				process.kill()
+	except (OSError, subprocess.SubprocessError):
+		try:
+			process.kill()
+		except OSError:
+			pass
+
+
+def _request_stop() -> None:
+	_STOP_EVENT.set()
+	terminate_active_fallback_processes()
+	with _ACTIVE_YTDLP_LOCK:
+		processes = list(_ACTIVE_YTDLP_PROCESSES)
+	for process in processes:
+		_terminate_process_tree(process)
+
+
+def _shutdown_process_pool(executor: ProcessPoolExecutor | None) -> None:
+	if executor is None:
+		return
+	process_map = getattr(executor, "_processes", None) or {}
+	processes = list(process_map.values())
+	executor.shutdown(wait=False, cancel_futures=True)
+	for process in processes:
+		if process.is_alive():
+			process.terminate()
+	for process in processes:
+		process.join(timeout=2)
+		if process.is_alive():
+			process.kill()
+
+
+def run_ytdlp_channel_dump_api(
+	channel_url: str,
+	*,
+	max_videos: int = 60,
+	timeout_seconds: int = 180,
+) -> dict[str, Any]:
+	"""Extract a channel through yt-dlp's API inside a persistent worker."""
+	if str(LOCAL_YTDLP_ROOT) not in sys.path:
+		sys.path.insert(0, str(LOCAL_YTDLP_ROOT))
+	from yt_dlp import YoutubeDL
+
+	options = {
+		"extract_flat": "in_playlist",
+		"extractor_args": {"youtubetab": {"approximate_date": [""]}},
+		"playlistend": max(1, max_videos),
+		"skip_download": True,
+		"quiet": True,
+		"no_warnings": True,
+		"simulate": True,
+		"socket_timeout": timeout_seconds,
+	}
+	with YoutubeDL(options) as ydl:
+		info = ydl.extract_info(channel_url + "/videos", download=False)
+		data = ydl.sanitize_info(info)
+	if not isinstance(data, dict):
+		raise RuntimeError(f"yt-dlp API returned invalid data for {channel_url}")
+	return data
 
 
 class _DBRunner:
@@ -283,8 +374,17 @@ def _best_thumbnail_url(thumbnails: Any, *, kind: str) -> str | None:
 # ── YouTube RSS feed helper ──────────────────────────────────────────
 _YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 _RSS_ATOM_NS = "{http://www.w3.org/2005/Atom}"
-_RSS_MEDIA_NS = "{http://search.yahoo.com/mrss/}"
 _RSS_YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
+_RSS_THREAD_LOCAL = threading.local()
+
+
+def _rss_session() -> requests.Session:
+	session = getattr(_RSS_THREAD_LOCAL, "session", None)
+	if session is None:
+		session = requests.Session()
+		session.headers.update({"User-Agent": "Mozilla/5.0"})
+		_RSS_THREAD_LOCAL.session = session
+	return session
 
 
 def fetch_rss_dates(
@@ -310,10 +410,10 @@ def fetch_rss_dates(
 
 	url = _YOUTUBE_RSS_URL.format(channel_id=channel_id)
 	try:
-		req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-		with urlopen(req, timeout=timeout_seconds) as resp:
-			xml_bytes = resp.read()
-	except (URLError, OSError, TimeoutError) as e:
+		response = _rss_session().get(url, timeout=timeout_seconds)
+		response.raise_for_status()
+		xml_bytes = response.content
+	except requests.RequestException as e:
 		print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][rss] failed to fetch feed for {channel_id}: {e}\033[0m")
 		return {}, None
 
@@ -378,6 +478,8 @@ def run_ytdlp_channel_dump(
 	"""
 	if not channel_url:
 		raise ValueError("channel_url is required")
+	if _STOP_EVENT.is_set():
+		raise InterruptedError("Channel discovery stopped by user")
 	if max_videos <= 0:
 		max_videos = 1
 
@@ -401,26 +503,39 @@ def run_ytdlp_channel_dump(
 	print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][yt-dlp] fetching: {channel_url}...\033[0m")
 
 	try:
-		proc = subprocess.run(
+		process = subprocess.Popen(
 			cmd,
-			capture_output=True,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
 			text=True,
-			timeout=timeout_seconds,
 			env=env,
 		)
-	except subprocess.TimeoutExpired as e:
-		raise RuntimeError(f"yt-dlp timeout for {channel_url}") from e
+	except OSError as exc:
+		raise RuntimeError(f"Unable to start yt-dlp for {channel_url}: {exc}") from exc
+	with _ACTIVE_YTDLP_LOCK:
+		_ACTIVE_YTDLP_PROCESSES.add(process)
+	if _STOP_EVENT.is_set():
+		_terminate_process_tree(process)
+	try:
+		stdout, stderr = process.communicate(timeout=timeout_seconds)
+	except subprocess.TimeoutExpired as exc:
+		_terminate_process_tree(process)
+		process.communicate()
+		raise RuntimeError(f"yt-dlp timeout for {channel_url}") from exc
+	finally:
+		with _ACTIVE_YTDLP_LOCK:
+			_ACTIVE_YTDLP_PROCESSES.discard(process)
 
-	if proc.returncode != 0:
-		err = (proc.stderr or "").strip()
-		out = (proc.stdout or "").strip()
+	if process.returncode != 0:
+		err = (stderr or "").strip()
+		out = (stdout or "").strip()
 		suffix = err or out
 		msg = f"yt-dlp failed for {channel_url}"
 		if suffix:
 			msg += f": {suffix[:5000]}"
 		raise RuntimeError(msg)
 
-	stdout = (proc.stdout or "").strip()
+	stdout = (stdout or "").strip()
 	if not stdout:
 		raise RuntimeError(f"yt-dlp produced empty output for {channel_url}")
 
@@ -571,8 +686,12 @@ def process_one_channel(
 	channel_url: str,
 	db: _DBRunner,
 	*,
+	claim_owner: str,
 	oldest_video_client: YouTubeOldestVideoClient | None = None,
 	oldest_video_client_error: str | None = None,
+	http_executor: ThreadPoolExecutor | None = None,
+	ytdlp_mode: str = "subprocess",
+	ytdlp_executor: ProcessPoolExecutor | None = None,
 	max_videos: int = 60,
 	timeout_seconds: int = 180,
 	# Note: DB operations are executed on the db runner loop.
@@ -590,53 +709,95 @@ Returns:
 	if not channel_url:
 		# Defensive: empty URL is a failed unit of work.
 		return (channel_url, "failed", "pending", None)
+	if _STOP_EVENT.is_set():
+		return (channel_url, "failed", "pending", None)
 
 	# Idempotency check: if already processed, skip.
 	if bool(db.run(is_channel_processed(channel_url))):
+		db.run(release_channel_discovery_claim(channel_url, claim_owner))
 		print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][skip] already processed: {channel_url}\033[0m")
 		return (channel_url, "skipped", "pending", None)
 
 	try:
-		# 1) Fetch real channel data with yt-dlp (subprocess).
-		dump = run_ytdlp_channel_dump(
-			channel_url,
-			max_videos=max_videos,
-			timeout_seconds=timeout_seconds,
-		)
+		# 1) Fetch real channel data using the selected yt-dlp execution mode.
+		if ytdlp_mode == "process-pool":
+			if ytdlp_executor is None:
+				raise RuntimeError("yt-dlp process pool is not initialized")
+			future = ytdlp_executor.submit(
+				run_ytdlp_channel_dump_api,
+				channel_url,
+				max_videos=max_videos,
+				timeout_seconds=timeout_seconds,
+			)
+			try:
+				dump = future.result(timeout=timeout_seconds)
+			except FutureTimeoutError as exc:
+				future.cancel()
+				raise RuntimeError(f"yt-dlp process-pool timeout for {channel_url}") from exc
+		else:
+			dump = run_ytdlp_channel_dump(
+				channel_url,
+				max_videos=max_videos,
+				timeout_seconds=timeout_seconds,
+			)
 		# 2) Parse the JSON into raw rows.
 		channel_row = parse_channel_raw(channel_url, dump)
 		video_rows = parse_channel_videos_raw(channel_url, dump, max_videos=max_videos)
 
-		# 3) Supplement dates from YouTube RSS feed.
+		# 3) Resolve RSS and first-video metadata concurrently.
 		#    yt-dlp --flat-playlist often returns no upload_date.
 		#    The RSS feed gives exact dates for the 15 most recent videos.
 		channel_id = channel_row.get("channel_id")
-		if channel_id:
-			rss_dates, last_upload_date = fetch_rss_dates(channel_id)
+		rss_future = None
+		first_video_future = None
+		if channel_id and http_executor is not None:
+			rss_future = http_executor.submit(fetch_rss_dates, channel_id)
+			if oldest_video_client is not None:
+				first_video_future = http_executor.submit(
+					resolve_first_video,
+					channel_url,
+					channel_id,
+					oldest_video_client,
+					fallback_timeout_seconds=timeout_seconds,
+				)
 
-			# Backfill missing upload_date on video rows.
-			if rss_dates:
-				backfilled = 0
-				for vrow in video_rows:
-					if not vrow.get("upload_date"):
-						rss_date = rss_dates.get(vrow["video_id"])
-						if rss_date:
-							vrow["upload_date"] = rss_date
-							backfilled += 1
-				if backfilled:
-					print(f"\033[96m[{_utcnow().strftime('%H:%M:%S')}][rss] backfilled {backfilled} missing dates\033[0m")
+		if rss_future is not None:
+			rss_dates, _rss_latest = rss_future.result()
+		elif channel_id:
+			rss_dates, _rss_latest = fetch_rss_dates(channel_id)
+		else:
+			rss_dates = {}
 
-			# Store last_upload_date on the channel row.
-			channel_row["last_upload_date"] = last_upload_date
+		# Exact RSS dates replace both missing and approximate flat-playlist dates.
+		corrected = 0
+		for vrow in video_rows:
+			rss_date = rss_dates.get(vrow["video_id"])
+			if rss_date and vrow.get("upload_date") != rss_date:
+				vrow["upload_date"] = rss_date
+				corrected += 1
+		if corrected:
+			print(f"\033[96m[{_utcnow().strftime('%H:%M:%S')}][rss] corrected {corrected} dates\033[0m")
+
+		# Prefer the exact RSS date for the newest long video. When the RSS
+		# window no longer contains it, preserve yt-dlp's approximate date.
+		if video_rows:
+			newest = video_rows[0]
+			channel_row["last_upload_date"] = (
+				rss_dates.get(newest["video_id"]) or newest.get("upload_date")
+			)
 
 		# 3b) Resolve the actual oldest public entry from the channel's Videos tab.
-		if oldest_video_client is not None and channel_id:
+		first_video = None
+		if first_video_future is not None:
+			first_video = first_video_future.result()
+		elif oldest_video_client is not None and channel_id:
 			first_video = resolve_first_video(
 				channel_url,
 				channel_id,
 				oldest_video_client,
 				fallback_timeout_seconds=timeout_seconds,
 			)
+		if first_video is not None:
 			channel_row.update(first_video)
 			first_status = first_video["first_video_status"]
 			if first_status == "success":
@@ -656,10 +817,12 @@ Returns:
 			channel_row["first_video_last_error"] = oldest_video_client_error
 
 		# 4) Persist raw data via db.py (async), executed on the DB loop thread.
-		db.run(upsert_channel_raw(channel_row))
-		db.run(upsert_channel_videos_raw(channel_url, video_rows))
-		# 5) Mark processed ONLY after successful fetch + persistence.
-		db.run(mark_channel_processed(channel_url, status="success"))
+		db.run(persist_channel_discovery_result(
+			channel_row,
+			video_rows,
+			claim_owner=claim_owner,
+			status="success",
+		))
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][ok] processed: {channel_url} (videos={len(video_rows)})\033[0m")
 		return (
 			channel_url,
@@ -675,7 +838,11 @@ Returns:
 		if "Failed to resolve url" in msg or "HTTP Error 404" in msg or "does the playlist exist" in msg:
 			print(f"\033[91m[{_utcnow().strftime('%H:%M:%S')}][failed-permanent] {channel_url}: Marking as failed. Reason: {msg[:100]}\033[0m")
 			# Mark as processed so we don't retry. Status = "failed".
-			db.run(mark_channel_processed(channel_url, status="failed"))
+			db.run(mark_channel_processed(
+				channel_url,
+				status="failed",
+				claim_owner=claim_owner,
+			))
 			return (channel_url, "failed", "pending", None)
 
 		# Transient failure: do NOT mark as processed. Retry next time.
@@ -691,6 +858,12 @@ def run(
 	timeout_seconds: int = 180,
 	first_video_timeout_seconds: int = 20,
 	language: str = "es",
+	max_workers: int = MAX_WORKERS,
+	claim_batch_size: int | None = None,
+	claim_stale_minutes: int = DEFAULT_CLAIM_STALE_MINUTES,
+	ensure_schema: bool = True,
+	finalize: bool = True,
+	ytdlp_mode: str = "subprocess",
 ) -> None:
 	"""Main orchestration: fetch candidates -> process in parallel workers.
 
@@ -698,15 +871,39 @@ def run(
 	- DB: single asyncio loop thread (asyncpg-safe)
 	- Workers: ThreadPoolExecutor (each worker runs yt-dlp subprocess + then DB calls via _DBRunner)
 	"""
+	if max_workers < 1:
+		raise ValueError("max_workers must be positive")
+	if claim_stale_minutes < 1:
+		raise ValueError("claim_stale_minutes must be positive")
+	if ytdlp_mode not in {"subprocess", "process-pool"}:
+		raise ValueError("ytdlp_mode must be subprocess or process-pool")
+	batch_size = claim_batch_size or max_workers * 2
+	if batch_size < 1:
+		raise ValueError("claim_batch_size must be positive")
+
+	_STOP_EVENT.clear()
+	claim_owner = str(uuid.uuid4())
 	db = _DBRunner()
+	worker_executor: ThreadPoolExecutor | None = None
+	http_executor: ThreadPoolExecutor | None = None
+	ytdlp_executor: ProcessPoolExecutor | None = None
 	print(f"\033[94m[info] starting DB loop thread\033[0m")
 	db.start()
 	try:
 		# Keep asyncpg (db.py) on a single dedicated event loop/thread.
 		# init_db() creates the pool and (as designed in db.py) will create tables idempotently.
 		# Use a small pool size to allow high parallelism of jobs (e.g. 20 jobs * 4 conn = 80 total).
-		db.run(init_db(dsn, min_size=1, max_size=4, language=language))
-		print(f"\033[92m[info] running workers: max_workers={MAX_WORKERS}\033[0m")
+		db.run(init_db(
+			dsn,
+			min_size=1,
+			max_size=4,
+			language=language,
+			ensure_schema=ensure_schema,
+		))
+		print(
+			f"\033[92m[info] running workers: max_workers={max_workers} "
+			f"claim_batch_size={batch_size} ytdlp_mode={ytdlp_mode}\033[0m"
+		)
 		oldest_video_client: YouTubeOldestVideoClient | None = None
 		oldest_video_client_error: str | None = None
 		try:
@@ -731,17 +928,31 @@ def run(
 			"innertube": 0,
 			"yt_dlp": 0,
 		}
+		if ytdlp_mode == "process-pool":
+			ytdlp_executor = ProcessPoolExecutor(
+				max_workers=max_workers,
+				mp_context=multiprocessing.get_context("spawn"),
+			)
+		worker_slots = max_workers * 2 if ytdlp_executor is not None else max_workers
+		worker_executor = ThreadPoolExecutor(max_workers=worker_slots)
+		http_executor = ThreadPoolExecutor(max_workers=max_workers * 2)
 
 		remaining = limit_channels
 		while True:
+			if _STOP_EVENT.is_set():
+				break
 			if remaining is not None and remaining <= 0:
 				break
 
-			batch_limit = DISCOVERY_BATCH_SIZE
+			batch_limit = batch_size
 			if remaining is not None:
 				batch_limit = min(batch_limit, remaining)
 
-			claimed = db.run(claim_channels_for_discovery(limit=batch_limit))
+			claimed = db.run(claim_channels_for_discovery(
+				limit=batch_limit,
+				claim_owner=claim_owner,
+				stale_after_minutes=claim_stale_minutes,
+			))
 			if not claimed:
 				break
 
@@ -750,48 +961,65 @@ def run(
 
 			print(f"\033[92m[info] claimed batch: {len(claimed)}\033[0m")
 
-			with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-				try:
-					# Submit 1 job per channel.
-					futures = {
-						executor.submit(
+			futures = {}
+			try:
+				# Submit 1 job per channel. In process-pool mode, the larger
+				# thread window overlaps HTTP persistence with later extraction.
+				futures = {
+					worker_executor.submit(
 							process_one_channel,
 							channel_url,
 							db,
+							claim_owner=claim_owner,
 							oldest_video_client=oldest_video_client,
 							oldest_video_client_error=oldest_video_client_error,
+							http_executor=http_executor,
+							ytdlp_mode=ytdlp_mode,
+							ytdlp_executor=ytdlp_executor,
 							max_videos=max_videos,
 							timeout_seconds=timeout_seconds,
 						): channel_url
 						for channel_url in claimed
-					}
+				}
 
-					# Consume results as they complete (out-of-order completion is expected).
-					for future in as_completed(futures):
-						channel_url, status, first_status, first_source = future.result()
-						if status == "processed":
-							processed += 1
-							first_video_counts[first_status] = first_video_counts.get(first_status, 0) + 1
-							if first_source:
-								first_video_counts[first_source] = first_video_counts.get(first_source, 0) + 1
-						elif status == "skipped":
-							skipped += 1
-						else:
-							failed += 1
-				except KeyboardInterrupt:
-					print(f"\n\033[91m[{_utcnow().strftime('%H:%M:%S')}][system] Interrupted by user. Exiting immediately...\033[0m")
-					# Force exit to kill threads immediately
-					os._exit(1)
+				# Consume results as they complete (out-of-order completion is expected).
+				for future in as_completed(futures):
+					channel_url, status, first_status, first_source = future.result()
+					if status == "processed":
+						processed += 1
+						first_video_counts[first_status] = first_video_counts.get(first_status, 0) + 1
+						if first_source:
+							first_video_counts[first_source] = first_video_counts.get(first_source, 0) + 1
+					elif status == "skipped":
+						skipped += 1
+					else:
+						failed += 1
+			except KeyboardInterrupt:
+				print(f"\n\033[91m[{_utcnow().strftime('%H:%M:%S')}][system] Interrupted by user. Stopping...\033[0m")
+				_request_stop()
+				for future in futures:
+					future.cancel()
+				db.run(release_channel_discovery_claims(claim_owner))
+				raise
 
-		if processed:
+		worker_executor.shutdown(wait=True)
+		worker_executor = None
+		http_executor.shutdown(wait=True)
+		http_executor = None
+		if ytdlp_executor is not None:
+			ytdlp_executor.shutdown(wait=True)
+			ytdlp_executor = None
+
+		if finalize and processed:
 			print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][stats] refreshing channel stats...\033[0m")
 			refreshed = bool(db.run(refresh_channel_stats(language)))
 			status = "refreshed" if refreshed else "already refreshing elsewhere"
 			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][stats] {status}\033[0m")
 
-		print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] truncating pipeline staging tables for language={language}...\033[0m")
-		purged_tables = db.run(purge_pipeline_staging_tables(language))
-		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
+		if finalize:
+			print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] truncating pipeline staging tables for language={language}...\033[0m")
+			purged_tables = db.run(purge_pipeline_staging_tables(language))
+			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
 		print(
@@ -802,7 +1030,25 @@ def run(
 			f"innertube={first_video_counts['innertube']} "
 			f"yt-dlp={first_video_counts['yt_dlp']}\033[0m"
 		)
+	except KeyboardInterrupt:
+		_request_stop()
+		try:
+			db.run(release_channel_discovery_claims(claim_owner))
+		except Exception:
+			pass
+		raise
 	finally:
+		if _STOP_EVENT.is_set():
+			try:
+				db.run(release_channel_discovery_claims(claim_owner))
+			except Exception:
+				pass
+		if worker_executor is not None:
+			worker_executor.shutdown(wait=False, cancel_futures=True)
+		if http_executor is not None:
+			http_executor.shutdown(wait=False, cancel_futures=True)
+		if ytdlp_executor is not None:
+			_shutdown_process_pool(ytdlp_executor)
 		# Ensure pool is closed on the DB loop thread.
 		try:
 			print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][info] closing DB pool\033[0m")
@@ -818,8 +1064,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="YouTube channel enrichment (yt-dlp, no analysis)")
 	p.add_argument("--limit-channels", type=int, default=None, help="Max channels to process (default: no limit)")
 	p.add_argument("--max-videos", type=int, default=60)
+	p.add_argument("--max-workers", type=int, default=MAX_WORKERS)
+	p.add_argument("--claim-batch-size", type=int, default=None)
+	p.add_argument(
+		"--claim-stale-minutes",
+		type=int,
+		default=DEFAULT_CLAIM_STALE_MINUTES,
+	)
 	p.add_argument("--timeout-seconds", type=int, default=180)
 	p.add_argument("--first-video-timeout-seconds", type=int, default=20)
+	p.add_argument("--skip-schema", action="store_false", dest="ensure_schema")
+	p.add_argument("--skip-finalize", action="store_false", dest="finalize")
+	p.add_argument(
+		"--ytdlp-mode",
+		choices=("subprocess", "process-pool"),
+		default="subprocess",
+	)
 	p.add_argument(
 		"--dsn",
 		type=str,
@@ -830,7 +1090,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	lang_group = p.add_mutually_exclusive_group()
 	lang_group.add_argument("--EN", action="store_const", const="en", dest="lang", help="Use English tables")
 	lang_group.add_argument("--ES", action="store_const", const="es", dest="lang", help="Use Spanish tables (default)")
-	p.set_defaults(lang="es")
+	p.set_defaults(lang="es", ensure_schema=True, finalize=True)
 	return p
 
 
@@ -839,11 +1099,21 @@ if __name__ == "__main__":
 	args = _build_arg_parser().parse_args()
 
 	# Keep orchestration synchronous; workers execute yt-dlp concurrently.
-	run(
-		limit_channels=args.limit_channels,
-		max_videos=args.max_videos,
-		dsn=args.dsn,
-		timeout_seconds=args.timeout_seconds,
-		first_video_timeout_seconds=args.first_video_timeout_seconds,
-		language=args.lang,
-	)
+	try:
+		run(
+			limit_channels=args.limit_channels,
+			max_videos=args.max_videos,
+			dsn=args.dsn,
+			timeout_seconds=args.timeout_seconds,
+			first_video_timeout_seconds=args.first_video_timeout_seconds,
+			language=args.lang,
+			max_workers=args.max_workers,
+			claim_batch_size=args.claim_batch_size,
+			claim_stale_minutes=args.claim_stale_minutes,
+			ensure_schema=args.ensure_schema,
+			finalize=args.finalize,
+			ytdlp_mode=args.ytdlp_mode,
+		)
+	except KeyboardInterrupt:
+		_request_stop()
+		print("\n\033[91m[system] Stopped by user\033[0m")

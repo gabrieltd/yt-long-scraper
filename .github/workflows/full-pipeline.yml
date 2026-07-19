@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       language:
-        description: 'Language/Locale (EN for English, ES for Spanish) nigger'
+        description: 'Language/Locale (EN for English, ES for Spanish)'
         required: false
         default: 'ES'
         type: choice
@@ -51,6 +51,10 @@ on:
         required: false
         default: '19'
         type: string
+
+concurrency:
+  group: youtube-long-channel-pipeline-${{ inputs.language }}
+  cancel-in-progress: false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 1 – Video Discovery
@@ -210,7 +214,20 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          CMD="python yt_first_video_enrichment.py --workers 5"
+          CMD="python yt_first_video_enrichment.py --workers 5 --batch-size 50 --skip-schema"
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+          $CMD
+
+      - name: Refresh channel stats and purge staging once
+        if: ${{ always() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          CMD="python yt_channel_finalize.py --skip-schema"
           if [ "${{ inputs.language }}" = "EN" ]; then
             CMD="$CMD --EN"
           else
@@ -304,7 +321,9 @@ jobs:
                   SELECT COUNT(DISTINCT vn.channel_url) AS canales_pendientes
                   FROM videos_normalized_{lang} vn
                   LEFT JOIN channels_processed_{lang} cp ON vn.channel_url = cp.channel_url
-                  LEFT JOIN channels_discovery_claims_{lang} cdc ON vn.channel_url = cdc.channel_url
+                  LEFT JOIN channels_discovery_claims_{lang} cdc
+                    ON vn.channel_url = cdc.channel_url
+                   AND cdc.claimed_at >= CURRENT_TIMESTAMP - INTERVAL '60 minutes'
                   WHERE
                       vn.validation_passed = TRUE
                       AND vn.channel_url IS NOT NULL
@@ -394,7 +413,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           echo "Starting Job ${{ matrix.job_index }} — processing ${{ needs.prepare-channel-matrix.outputs.channels_per_job }} channels"
-          CMD="python yt_channel_discovery.py --limit-channels ${{ needs.prepare-channel-matrix.outputs.channels_per_job }}"
+          CMD="python yt_channel_discovery.py --limit-channels ${{ needs.prepare-channel-matrix.outputs.channels_per_job }} --skip-schema --skip-finalize"
 
           if [ "${{ inputs.language }}" = "EN" ]; then
             CMD="$CMD --EN"

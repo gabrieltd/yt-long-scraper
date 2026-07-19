@@ -122,10 +122,12 @@ class OldestVideoClientTests(unittest.TestCase):
 
 
 class YtDlpFallbackTests(unittest.TestCase):
-    def _completed(self, payload: dict) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=json.dumps(payload), stderr=""
-        )
+    def _process(self, payload: dict) -> mock.Mock:
+        process = mock.Mock()
+        process.pid = 1234
+        process.returncode = 0
+        process.communicate.return_value = (json.dumps(payload), "")
+        return process
 
     def test_known_id_fallback_extracts_only_video(self) -> None:
         payload = {
@@ -136,8 +138,8 @@ class YtDlpFallbackTests(unittest.TestCase):
         with (
             mock.patch.object(oldest, "_local_ytdlp_env", return_value={}),
             mock.patch.object(
-                oldest.subprocess, "run", return_value=self._completed(payload)
-            ) as run_mock,
+                oldest.subprocess, "Popen", return_value=self._process(payload)
+            ) as popen_mock,
         ):
             result = oldest.fetch_first_video_with_ytdlp(
                 "https://www.youtube.com/@channel",
@@ -145,7 +147,7 @@ class YtDlpFallbackTests(unittest.TestCase):
                 known_video_id=VIDEO_ID,
                 project_root=Path("."),
             )
-        command = run_mock.call_args.args[0]
+        command = popen_mock.call_args.args[0]
         self.assertNotIn("--playlist-items", command)
         self.assertEqual(result.published_at, "2024-01-01T00:00:00Z")
 
@@ -161,15 +163,15 @@ class YtDlpFallbackTests(unittest.TestCase):
         with (
             mock.patch.object(oldest, "_local_ytdlp_env", return_value={}),
             mock.patch.object(
-                oldest.subprocess, "run", return_value=self._completed(payload)
-            ) as run_mock,
+                oldest.subprocess, "Popen", return_value=self._process(payload)
+            ) as popen_mock,
         ):
             result = oldest.fetch_first_video_with_ytdlp(
                 "https://www.youtube.com/@channel",
                 expected_channel_id=CHANNEL_ID,
                 project_root=Path("."),
             )
-        command = run_mock.call_args.args[0]
+        command = popen_mock.call_args.args[0]
         self.assertEqual(command[command.index("--playlist-items") + 1], "-1")
         self.assertEqual(result.published_at, "2020-01-02T00:00:00Z")
 

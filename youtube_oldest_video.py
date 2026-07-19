@@ -23,6 +23,8 @@ VIDEOS_TAB_PARAMS = "EgZ2aWRlb3PyBgQKAjoA"
 DEFAULT_TIMEOUT_SECONDS = 20
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
+_ACTIVE_FALLBACK_LOCK = threading.Lock()
+_ACTIVE_FALLBACK_PROCESSES: set[subprocess.Popen[str]] = set()
 
 _GRID_BASE = (
     "contents.twoColumnBrowseResultsRenderer.tabs.tabRenderer.content."
@@ -370,6 +372,39 @@ def _local_ytdlp_env(project_root: Path) -> dict[str, str]:
     return env
 
 
+def _terminate_fallback_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+        else:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def terminate_active_fallback_processes() -> None:
+    """Terminate only yt-dlp fallback processes created by this module."""
+    with _ACTIVE_FALLBACK_LOCK:
+        processes = list(_ACTIVE_FALLBACK_PROCESSES)
+    for process in processes:
+        _terminate_fallback_process(process)
+
+
 def fetch_first_video_with_ytdlp(
     channel_url: str,
     *,
@@ -402,17 +437,28 @@ def fetch_first_video_with_ytdlp(
         cmd.extend(["--playlist-items", "-1"])
     cmd.append(target)
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
             env=_local_ytdlp_env(root),
         )
+    except OSError as exc:
+        raise OldestVideoError(f"Unable to start yt-dlp fallback: {exc}") from exc
+    with _ACTIVE_FALLBACK_LOCK:
+        _ACTIVE_FALLBACK_PROCESSES.add(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        _terminate_fallback_process(process)
+        process.communicate()
         raise OldestVideoError(f"yt-dlp fallback timed out for {channel_url}") from exc
+    finally:
+        with _ACTIVE_FALLBACK_LOCK:
+            _ACTIVE_FALLBACK_PROCESSES.discard(process)
     if process.returncode != 0:
-        detail = (process.stderr or process.stdout or "").strip()
+        detail = (stderr or stdout or "").strip()
         lowered = detail.lower()
         if "no uploads" in lowered or "does not have a videos tab" in lowered:
             raise NoPublicVideosError("The channel has no public videos")
@@ -420,7 +466,7 @@ def fetch_first_video_with_ytdlp(
             f"yt-dlp fallback failed for {channel_url}: {detail[:1000]}"
         )
     try:
-        data = json.loads(process.stdout)
+        data = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise OldestVideoError("yt-dlp fallback returned invalid JSON") from exc
 

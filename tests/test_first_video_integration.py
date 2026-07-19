@@ -70,13 +70,8 @@ class ResolveFirstVideoTests(unittest.TestCase):
             mock.patch.object(discovery, "resolve_first_video", return_value=pending),
             mock.patch.object(
                 discovery,
-                "upsert_channel_raw",
-                new=mock.Mock(return_value="upsert-channel"),
-            ),
-            mock.patch.object(
-                discovery,
-                "upsert_channel_videos_raw",
-                new=mock.Mock(return_value="upsert-videos"),
+                "persist_channel_discovery_result",
+                new=mock.Mock(return_value="persist-channel"),
             ),
             mock.patch.object(
                 discovery,
@@ -88,6 +83,7 @@ class ResolveFirstVideoTests(unittest.TestCase):
             result = discovery.process_one_channel(
                 "https://www.youtube.com/@channel",
                 runner,
+                claim_owner="test-owner",
                 oldest_video_client=mock.Mock(),
             )
         self.assertEqual(result[1], "processed")

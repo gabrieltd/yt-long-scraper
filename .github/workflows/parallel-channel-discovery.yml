@@ -22,6 +22,10 @@ on:
           - 'EN'
           - 'ES'
 
+concurrency:
+  group: youtube-long-channel-pipeline-${{ inputs.language }}
+  cancel-in-progress: false
+
 jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
@@ -47,8 +51,45 @@ jobs:
           echo "Generated Matrix: $MATRIX_JSON"
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
-  channel-discovery:
+  prepare-schema:
     needs: prepare-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-channel.txt
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
+      - name: Ensure database schema once
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import asyncio
+          import db
+
+          language = "en" if "${{ inputs.language }}" == "EN" else "es"
+
+          async def main():
+              await db.init_db(language=language)
+              await db.close_db()
+
+          asyncio.run(main())
+          PY
+
+  channel-discovery:
+    needs: [prepare-matrix, prepare-schema]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -94,7 +135,7 @@ jobs:
           echo "Starting Job  ${{ matrix.job_index }} processing ${{ inputs.channels_per_job }} channels"
           # The script uses DB claiming, so multiple jobs will automatically pick different channels.
           # We pass limit-channels to control batch size per job.
-          CMD="python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }}"
+          CMD="python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }} --skip-schema --skip-finalize"
           
           # Add language flag
           if [ "${{ inputs.language }}" = "EN" ]; then
@@ -132,7 +173,20 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          CMD="python yt_first_video_enrichment.py --workers 5"
+          CMD="python yt_first_video_enrichment.py --workers 5 --batch-size 50 --skip-schema"
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+          $CMD
+
+      - name: Refresh channel stats and purge staging once
+        if: ${{ always() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          CMD="python yt_channel_finalize.py --skip-schema"
           if [ "${{ inputs.language }}" = "EN" ]; then
             CMD="$CMD --EN"
           else

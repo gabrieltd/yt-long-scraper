@@ -59,19 +59,26 @@ Archivo: [yt_channel_discovery.py](../yt_channel_discovery.py)
   - excluye canales ya presentes en `channels_processed`
 - Para cada canal en paralelo (Workers):
   - Ejecuta `python -m yt_dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
+  - Reclama canales atómicamente, con propietario y recuperación de claims vencidos
   - Resuelve `yt_dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
+  - Corrige las fechas aproximadas recientes con el feed RSS y conserva una fecha aproximada si el video ya salió de su ventana
   - Obtiene el primer video público desde el orden `Oldest` de `/videos`
   - Si falla una consulta individual, usa `yt-dlp` sobre el video conocido o `--playlist-items -1`
   - Persiste:
     - `channels_raw` (metadata de canal)
     - `channel_videos_raw` (últimos N videos del canal)
     - `channels_processed` (marca idempotente; `success` o `failed`)
+  - Persiste canal, videos y estado procesado en una transacción
 
 Salida: tablas `channels_raw`, `channel_videos_raw`, `channels_processed`.
 
 Los resultados pendientes se reintentan sin repetir el descubrimiento del canal:
 
 ```bash
-python yt_first_video_enrichment.py --workers 5
+python yt_first_video_enrichment.py --workers 5 --batch-size 50
 ```
+
+En GitHub Actions los workers omiten migraciones y finalización. Un único
+postproceso reintenta fechas pendientes, refresca `channel_stats` y purga las
+tablas staging cuando todos los workers terminan.
 

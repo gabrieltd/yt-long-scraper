@@ -106,8 +106,14 @@ python yt_normalization_validation.py
 # usa el yt-dlp local vendorizado en yt-dlp/yt-dlp
 python yt_channel_discovery.py
 
+# concurrencia configurable; el lote de claims predeterminado es 2 x workers
+python yt_channel_discovery.py --max-workers 6 --claim-stale-minutes 60
+
+# modo experimental; subprocess sigue siendo el valor predeterminado
+python yt_channel_discovery.py --ytdlp-mode process-pool
+
 # reintenta sólo canales cuya fecha del primer video quedó pendiente
-python yt_first_video_enrichment.py --workers 5
+python yt_first_video_enrichment.py --workers 5 --batch-size 50
 ```
 
 **Análisis de canal:**

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,7 +20,14 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20, language: str = "es") -> None:
+async def init_db(
+    dsn: str | None = None,
+    min_size: int = 1,
+    max_size: int = 20,
+    language: str = "es",
+    *,
+    ensure_schema: bool = True,
+) -> None:
     """Initialize the PostgreSQL connection pool and schema.
     
     Args:
@@ -27,6 +35,7 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20,
         min_size: Minimum pool size
         max_size: Maximum pool size
         language: Language suffix for tables ('es' or 'en')
+        ensure_schema: Run idempotent schema creation/migrations before returning.
     """
     global _DB_POOL, _DB_LANGUAGE
     
@@ -61,8 +70,8 @@ async def init_db(dsn: str | None = None, min_size: int = 1, max_size: int = 20,
         command_timeout=60  # Set command timeout
     )
     
-    # Create language-specific tables
-    await create_tables(language)
+    if ensure_schema:
+        await create_tables(language)
 
 
 async def create_tables(language: str = "es") -> None:
@@ -231,8 +240,13 @@ async def create_tables(language: str = "es") -> None:
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS channels_discovery_claims{lang_suffix} (
                 channel_url TEXT PRIMARY KEY,
-                claimed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                claimed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                claim_owner TEXT
             );
+        """)
+        await conn.execute(f"""
+            ALTER TABLE channels_discovery_claims{lang_suffix}
+            ADD COLUMN IF NOT EXISTS claim_owner TEXT;
         """)
 
         # channel_relevance — tracks whether a channel is relevant, with notes and tags
@@ -325,6 +339,8 @@ async def create_tables(language: str = "es") -> None:
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_last_upload ON channels_raw{lang_suffix} (last_upload_date);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_first_video_published ON channels_raw{lang_suffix} (first_video_published_at);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_first_video_pending ON channels_raw{lang_suffix} (first_video_status, first_video_last_attempt_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_channel_claims{lang_suffix}_claimed_at ON channels_discovery_claims{lang_suffix} (claimed_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_channel_claims{lang_suffix}_owner ON channels_discovery_claims{lang_suffix} (claim_owner);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_verified_true ON channels_raw{lang_suffix} (channel_url) WHERE is_verified IS TRUE;",
             f"CREATE INDEX IF NOT EXISTS idx_channel_relevance{lang_suffix}_tags_gin ON channel_relevance{lang_suffix} USING GIN (tags);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_name_trgm ON channels_raw{lang_suffix} USING GIN (channel_name gin_trgm_ops);",
@@ -634,68 +650,90 @@ async def insert_videos_normalized(rows: list[dict[str, Any]]) -> tuple[int, int
     return len(tuples), len(rows) - len(tuples)
 
 
-async def claim_channels_for_discovery(limit: int) -> list[str]:
-    """Atomically claim candidate channels for discovery."""
+async def claim_channels_for_discovery(
+    limit: int,
+    *,
+    claim_owner: str | None = None,
+    stale_after_minutes: int = 60,
+) -> list[str]:
+    """Atomically claim and return only channels acquired by this caller."""
     if limit <= 0:
         return []
-    pool = _require_pool()
-
-    # We need a transaction to be safe?
-    # The original implementation did SELECT then INSERT in standard autocommit mode (which sqlite might handle differently).
-    # To be atomic, we can do a CTE based update or simply lock.
-    # Or just select and try insertion.
-    
+    if stale_after_minutes <= 0:
+        raise ValueError("stale_after_minutes must be positive")
+    owner = claim_owner or str(uuid.uuid4())
     videos_normalized_table = _get_table_name("videos_normalized")
     channels_processed_table = _get_table_name("channels_processed")
     channels_claims_table = _get_table_name("channels_discovery_claims")
-    
-    # 1. Select candidates
-    select_sql = f"""
-        SELECT n.channel_url
-        FROM {videos_normalized_table} n
-        LEFT JOIN {channels_processed_table} p ON p.channel_url = n.channel_url
-        LEFT JOIN {channels_claims_table} c ON c.channel_url = n.channel_url
-        WHERE n.validation_passed = TRUE
-          AND n.channel_url IS NOT NULL 
-          AND n.channel_url <> ''
-          AND p.channel_url IS NULL
-          AND c.channel_url IS NULL
-        GROUP BY n.channel_url
-        ORDER BY MIN(n.normalized_at) ASC
-        LIMIT $1
-    """
-
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            rows = await conn.fetch(select_sql, limit)
-            candidates = [r["channel_url"] for r in rows]
-            if not candidates:
-                return []
-
-            # 2. Insert into claims
-            claim_tuples = [(url, _utcnow()) for url in candidates]
-            
-            # Using ON CONFLICT DO NOTHING to handle races if multiple workers pick same
-            await conn.executemany(
-                f"INSERT INTO {channels_claims_table} (channel_url, claimed_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                claim_tuples
-            )
-            
-            # Verify which ones we actually claimed?
-            # Strictly speaking, if we lost the race, we shouldn't return them.
-            # But for simplicity, we assume we got them.
-            return candidates
+    rows = await _require_pool().fetch(f"""
+        WITH candidates AS (
+            SELECT n.channel_url, MIN(n.normalized_at) AS first_seen
+            FROM {videos_normalized_table} n
+            WHERE n.validation_passed = TRUE
+              AND n.channel_url IS NOT NULL
+              AND n.channel_url <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM {channels_processed_table} p
+                  WHERE p.channel_url = n.channel_url
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM {channels_claims_table} c
+                  WHERE c.channel_url = n.channel_url
+                    AND c.claimed_at >= CURRENT_TIMESTAMP
+                        - ($3::INTEGER * INTERVAL '1 minute')
+              )
+            GROUP BY n.channel_url
+            ORDER BY first_seen ASC
+            LIMIT $1
+        ),
+        claimed AS (
+            INSERT INTO {channels_claims_table} (channel_url, claimed_at, claim_owner)
+            SELECT channel_url, CURRENT_TIMESTAMP, $2
+            FROM candidates
+            ON CONFLICT (channel_url) DO UPDATE
+            SET claimed_at = EXCLUDED.claimed_at,
+                claim_owner = EXCLUDED.claim_owner
+            WHERE {channels_claims_table}.claimed_at < CURRENT_TIMESTAMP
+                - ($3::INTEGER * INTERVAL '1 minute')
+            RETURNING channel_url
+        )
+        SELECT channel_url FROM claimed
+    """, limit, owner, stale_after_minutes)
+    return [row["channel_url"] for row in rows]
 
 
-async def upsert_channel_raw(channel: dict[str, Any]) -> None:
-    """Upsert one raw channel row."""
-    pool = _require_pool()
+async def release_channel_discovery_claims(claim_owner: str) -> int:
+    """Release claims belonging to one discovery run and no other owner."""
+    if not claim_owner:
+        return 0
+    table_name = _get_table_name("channels_discovery_claims")
+    result = await _require_pool().execute(
+        f"DELETE FROM {table_name} WHERE claim_owner = $1",
+        claim_owner,
+    )
+    return int(result.rsplit(" ", 1)[-1])
+
+
+async def release_channel_discovery_claim(channel_url: str, claim_owner: str) -> bool:
+    """Release one claim only when it is still owned by this run."""
+    if not channel_url or not claim_owner:
+        return False
+    table_name = _get_table_name("channels_discovery_claims")
+    result = await _require_pool().execute(
+        f"DELETE FROM {table_name} WHERE channel_url = $1 AND claim_owner = $2",
+        channel_url,
+        claim_owner,
+    )
+    return result.endswith(" 1")
+
+
+async def _upsert_channel_raw_with(executor: Any, channel: dict[str, Any]) -> None:
     url = channel.get("channel_url")
     if not url:
         raise ValueError("channel_url is required")
 
     table_name = _get_table_name("channels_raw")
-    await pool.execute(f"""
+    await executor.execute(f"""
         INSERT INTO {table_name} (
             channel_url, channel_id, channel_name, subscriber_count, is_verified,
             channel_description, channel_tags, avatar_url, banner_url, uploader_id, uploader_url,
@@ -753,6 +791,11 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
         _ensure_datetime(channel.get("first_video_claimed_at")),
         _ensure_datetime(channel.get("extracted_at")) or _utcnow()
     )
+
+
+async def upsert_channel_raw(channel: dict[str, Any]) -> None:
+    """Upsert one raw channel row."""
+    await _upsert_channel_raw_with(_require_pool(), channel)
 
 
 async def update_first_video_success(
@@ -826,6 +869,7 @@ async def claim_channels_for_first_video_enrichment(
     limit: int,
     *,
     stale_after_minutes: int = 60,
+    eligible_before: datetime | None = None,
 ) -> list[dict[str, str]]:
     """Atomically claim pending enrichment rows, including stale workers."""
     if limit <= 0:
@@ -837,7 +881,14 @@ async def claim_channels_for_first_video_enrichment(
             FROM {table_name}
             WHERE channel_id IS NOT NULL
               AND (
-                  first_video_status = 'pending'
+                  (
+                      first_video_status = 'pending'
+                      AND (
+                          $3::TIMESTAMPTZ IS NULL
+                          OR first_video_last_attempt_at IS NULL
+                          OR first_video_last_attempt_at < $3
+                      )
+                  )
                   OR (
                       first_video_status = 'processing'
                       AND first_video_claimed_at < CURRENT_TIMESTAMP
@@ -855,16 +906,76 @@ async def claim_channels_for_first_video_enrichment(
         FROM candidates
         WHERE channel.channel_url = candidates.channel_url
         RETURNING channel.channel_url, channel.channel_id
-    """, limit, stale_after_minutes)
+    """, limit, stale_after_minutes, eligible_before)
     return [dict(row) for row in rows]
 
 
-async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any]]) -> tuple[int, int]:
-    """Batch upsert raw channel videos."""
-    if not videos:
-        return (0, 0)
-    pool = _require_pool()
+async def update_first_video_results(results: list[dict[str, Any]]) -> int:
+    """Persist a mixed enrichment result batch in one PostgreSQL round-trip."""
+    if not results:
+        return 0
+    payload: list[dict[str, Any]] = []
+    now = _utcnow()
+    for result in results:
+        channel_url = result.get("channel_url")
+        status = result.get("first_video_status")
+        if not channel_url or status not in {"success", "no_public_videos", "pending"}:
+            continue
+        attempted_at = _ensure_datetime(result.get("first_video_last_attempt_at")) or now
+        checked_at = (
+            _ensure_datetime(result.get("first_video_checked_at")) or attempted_at
+            if status in {"success", "no_public_videos"}
+            else None
+        )
+        payload.append({
+            "channel_url": channel_url,
+            "status": status,
+            "video_id": result.get("first_video_id") if status == "success" else None,
+            "published_at": (
+                _ensure_datetime(result.get("first_video_published_at")).isoformat()
+                if status == "success" and result.get("first_video_published_at")
+                else None
+            ),
+            "checked_at": checked_at.isoformat() if checked_at else None,
+            "attempted_at": attempted_at.isoformat(),
+            "source": result.get("first_video_source") if status == "success" else None,
+            "error": (result.get("first_video_last_error") or "")[:2000] or None,
+        })
+    if not payload:
+        return 0
+    table_name = _get_table_name("channels_raw")
+    await _require_pool().execute(f"""
+        UPDATE {table_name} AS channel
+        SET first_video_id = CASE WHEN result.status = 'success' THEN result.video_id ELSE NULL END,
+            first_video_published_at = CASE
+                WHEN result.status = 'success' THEN result.published_at
+                ELSE NULL
+            END,
+            first_video_checked_at = result.checked_at,
+            first_video_last_attempt_at = result.attempted_at,
+            first_video_status = result.status,
+            first_video_source = CASE WHEN result.status = 'success' THEN result.source ELSE NULL END,
+            first_video_last_error = CASE WHEN result.status = 'success' THEN NULL ELSE result.error END,
+            first_video_claimed_at = NULL
+        FROM jsonb_to_recordset($1::JSONB) AS result(
+            channel_url TEXT,
+            status TEXT,
+            video_id TEXT,
+            published_at TIMESTAMPTZ,
+            checked_at TIMESTAMPTZ,
+            attempted_at TIMESTAMPTZ,
+            source TEXT,
+            error TEXT
+        )
+        WHERE channel.channel_url = result.channel_url
+          AND channel.first_video_status NOT IN ('success', 'no_public_videos')
+    """, json.dumps(payload))
+    return len(payload)
 
+
+def _prepare_channel_video_columns(
+    videos: list[dict[str, Any]],
+) -> tuple[list[list[Any]], int]:
     tuples = []
     seen = set()
     for v in videos:
@@ -876,7 +987,6 @@ async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any
         seen.add(vid)
 
         tuples.append((
-            channel_url,
             vid,
             v.get("upload_date"),
             v.get("duration_seconds"),
@@ -887,15 +997,34 @@ async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any
         ))
 
     if not tuples:
-        return (0, 0)
+        return ([], 0)
+    columns = [list(values) for values in zip(*tuples)]
+    return (columns, len(tuples))
 
+
+async def _upsert_channel_videos_raw_with(
+    executor: Any,
+    channel_url: str,
+    videos: list[dict[str, Any]],
+) -> tuple[int, int]:
+    columns, count = _prepare_channel_video_columns(videos)
+    if not count:
+        return (0, 0)
     table_name = _get_table_name("channel_videos_raw")
-    await pool.executemany(f"""
+    await executor.execute(f"""
         INSERT INTO {table_name} (
             channel_url, video_id, upload_date, duration_seconds, view_count,
             title, video_url, thumbnail_url
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        SELECT $1, batch.video_id, batch.upload_date, batch.duration_seconds,
+               batch.view_count, batch.title, batch.video_url, batch.thumbnail_url
+        FROM UNNEST(
+            $2::TEXT[], $3::TEXT[], $4::BIGINT[], $5::BIGINT[],
+            $6::TEXT[], $7::TEXT[], $8::TEXT[]
+        ) AS batch(
+            video_id, upload_date, duration_seconds, view_count,
+            title, video_url, thumbnail_url
+        )
         ON CONFLICT(channel_url, video_id) DO UPDATE SET
             upload_date=COALESCE(EXCLUDED.upload_date, {table_name}.upload_date),
             duration_seconds=COALESCE(EXCLUDED.duration_seconds, {table_name}.duration_seconds),
@@ -903,24 +1032,90 @@ async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any
             title=COALESCE(EXCLUDED.title, {table_name}.title),
             video_url=COALESCE(EXCLUDED.video_url, {table_name}.video_url),
             thumbnail_url=COALESCE(EXCLUDED.thumbnail_url, {table_name}.thumbnail_url)
-    """, tuples)
-    
-    return len(tuples), 0
+    """, channel_url, *columns)
+    return count, 0
 
 
-async def mark_channel_processed(channel_url: str, *, processed_at: datetime | None = None, status: str = "success") -> None:
-    """Mark a channel as processed."""
-    pool = _require_pool()
-    p_at = _ensure_datetime(processed_at) or _utcnow()
+async def upsert_channel_videos_raw(
+    channel_url: str,
+    videos: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Upsert all videos for a channel in one PostgreSQL statement."""
+    return await _upsert_channel_videos_raw_with(
+        _require_pool(), channel_url, videos
+    )
 
+
+async def _mark_channel_processed_with(
+    executor: Any,
+    channel_url: str,
+    *,
+    processed_at: datetime,
+    status: str,
+) -> None:
     table_name = _get_table_name("channels_processed")
-    await pool.execute(f"""
+    await executor.execute(f"""
         INSERT INTO {table_name} (channel_url, processed_at, status)
         VALUES ($1, $2, $3)
         ON CONFLICT(channel_url) DO UPDATE SET
             processed_at=EXCLUDED.processed_at,
             status=EXCLUDED.status
-    """, channel_url, p_at, status)
+    """, channel_url, processed_at, status)
+
+
+async def persist_channel_discovery_result(
+    channel: dict[str, Any],
+    videos: list[dict[str, Any]],
+    *,
+    claim_owner: str,
+    status: str = "success",
+) -> tuple[int, int]:
+    """Persist one completed channel and release its claim atomically."""
+    channel_url = channel.get("channel_url")
+    if not channel_url:
+        raise ValueError("channel_url is required")
+    pool = _require_pool()
+    claims_table = _get_table_name("channels_discovery_claims")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await _upsert_channel_raw_with(conn, channel)
+            counts = await _upsert_channel_videos_raw_with(conn, channel_url, videos)
+            await _mark_channel_processed_with(
+                conn,
+                channel_url,
+                processed_at=_utcnow(),
+                status=status,
+            )
+            await conn.execute(
+                f"DELETE FROM {claims_table} WHERE channel_url = $1 AND claim_owner = $2",
+                channel_url,
+                claim_owner,
+            )
+    return counts
+
+
+async def mark_channel_processed(
+    channel_url: str,
+    *,
+    processed_at: datetime | None = None,
+    status: str = "success",
+    claim_owner: str | None = None,
+) -> None:
+    """Mark a channel as processed."""
+    p_at = _ensure_datetime(processed_at) or _utcnow()
+    pool = _require_pool()
+    claims_table = _get_table_name("channels_discovery_claims")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await _mark_channel_processed_with(
+                conn, channel_url, processed_at=p_at, status=status
+            )
+            if claim_owner:
+                await conn.execute(
+                    f"DELETE FROM {claims_table} WHERE channel_url = $1 AND claim_owner = $2",
+                    channel_url,
+                    claim_owner,
+                )
 
 
 async def is_channel_processed(channel_url: str) -> bool:

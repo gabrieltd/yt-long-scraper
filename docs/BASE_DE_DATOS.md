@@ -103,6 +103,9 @@ Coordinación de workers.
 Campos:
 - `channel_url` (TEXT, PK)
 - `claimed_at` (TIMESTAMPTZ)
+- `claim_owner` (TEXT; identifica la ejecución que puede liberar el claim)
+
+Los claims con más de 60 minutos se consideran recuperables por otra ejecución.
 
 ## Operación idempotente
 
