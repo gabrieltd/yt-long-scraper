@@ -137,7 +137,14 @@ async def create_tables(language: str = "es") -> None:
                 uploader_id TEXT,
                 uploader_url TEXT,
                 last_upload_date TEXT,
-                first_upload_date TEXT,
+                first_video_id TEXT,
+                first_video_published_at TIMESTAMPTZ,
+                first_video_checked_at TIMESTAMPTZ,
+                first_video_last_attempt_at TIMESTAMPTZ,
+                first_video_status TEXT NOT NULL DEFAULT 'pending',
+                first_video_source TEXT,
+                first_video_last_error TEXT,
+                first_video_claimed_at TIMESTAMPTZ,
                 extracted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
         """)
@@ -148,12 +155,6 @@ async def create_tables(language: str = "es") -> None:
             ADD COLUMN IF NOT EXISTS last_upload_date TEXT;
         """)
 
-        # Migration: add first_upload_date if table already exists without it
-        await conn.execute(f"""
-            ALTER TABLE channels_raw{lang_suffix}
-            ADD COLUMN IF NOT EXISTS first_upload_date TEXT;
-        """)
-
         for column, definition in (
             ("channel_description", "TEXT"),
             ("channel_tags", "TEXT[]"),
@@ -161,10 +162,41 @@ async def create_tables(language: str = "es") -> None:
             ("banner_url", "TEXT"),
             ("uploader_id", "TEXT"),
             ("uploader_url", "TEXT"),
+            ("first_video_id", "TEXT"),
+            ("first_video_published_at", "TIMESTAMPTZ"),
+            ("first_video_checked_at", "TIMESTAMPTZ"),
+            ("first_video_last_attempt_at", "TIMESTAMPTZ"),
+            ("first_video_status", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("first_video_source", "TEXT"),
+            ("first_video_last_error", "TEXT"),
+            ("first_video_claimed_at", "TIMESTAMPTZ"),
         ):
             await conn.execute(
                 f"ALTER TABLE channels_raw{lang_suffix} ADD COLUMN IF NOT EXISTS {column} {definition};"
             )
+
+        await conn.execute(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'channels_raw{language}_first_video_status_check'
+                ) THEN
+                    ALTER TABLE channels_raw{lang_suffix}
+                    ADD CONSTRAINT channels_raw{language}_first_video_status_check
+                    CHECK (first_video_status IN ('pending', 'processing', 'success', 'no_public_videos'));
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'channels_raw{language}_first_video_source_check'
+                ) THEN
+                    ALTER TABLE channels_raw{lang_suffix}
+                    ADD CONSTRAINT channels_raw{language}_first_video_source_check
+                    CHECK (first_video_source IS NULL OR first_video_source IN ('innertube', 'yt_dlp'));
+                END IF;
+            END
+            $$;
+        """)
 
         # channel_videos_raw
         await conn.execute(f"""
@@ -291,7 +323,8 @@ async def create_tables(language: str = "es") -> None:
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_extracted_at ON channels_raw{lang_suffix} (extracted_at);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_subscribers ON channels_raw{lang_suffix} (subscriber_count);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_last_upload ON channels_raw{lang_suffix} (last_upload_date);",
-            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_first_upload ON channels_raw{lang_suffix} (first_upload_date);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_first_video_published ON channels_raw{lang_suffix} (first_video_published_at);",
+            f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_first_video_pending ON channels_raw{lang_suffix} (first_video_status, first_video_last_attempt_at);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_verified_true ON channels_raw{lang_suffix} (channel_url) WHERE is_verified IS TRUE;",
             f"CREATE INDEX IF NOT EXISTS idx_channel_relevance{lang_suffix}_tags_gin ON channel_relevance{lang_suffix} USING GIN (tags);",
             f"CREATE INDEX IF NOT EXISTS idx_channels_raw{lang_suffix}_name_trgm ON channels_raw{lang_suffix} USING GIN (channel_name gin_trgm_ops);",
@@ -401,7 +434,9 @@ def _ensure_datetime(dt: datetime | str | None) -> datetime | None:
     if isinstance(dt, str):
         # If it's a string, try to parse it (assuming ISO format)
         try:
-            return datetime.fromisoformat(dt)
+            normalized = dt[:-1] + "+00:00" if dt.endswith("Z") else dt
+            parsed = datetime.fromisoformat(normalized)
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
         except ValueError:
             return None
     return None
@@ -664,9 +699,12 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
         INSERT INTO {table_name} (
             channel_url, channel_id, channel_name, subscriber_count, is_verified,
             channel_description, channel_tags, avatar_url, banner_url, uploader_id, uploader_url,
-            last_upload_date, first_upload_date, extracted_at
+            last_upload_date, first_video_id, first_video_published_at,
+            first_video_checked_at, first_video_last_attempt_at, first_video_status,
+            first_video_source, first_video_last_error, first_video_claimed_at, extracted_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, $17, $18, $19, $20, $21)
         ON CONFLICT(channel_url) DO UPDATE SET
             channel_id=COALESCE(EXCLUDED.channel_id, {table_name}.channel_id),
             channel_name=COALESCE(EXCLUDED.channel_name, {table_name}.channel_name),
@@ -679,7 +717,18 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
             uploader_id=COALESCE(EXCLUDED.uploader_id, {table_name}.uploader_id),
             uploader_url=COALESCE(EXCLUDED.uploader_url, {table_name}.uploader_url),
             last_upload_date=COALESCE(EXCLUDED.last_upload_date, {table_name}.last_upload_date),
-            first_upload_date=COALESCE(EXCLUDED.first_upload_date, {table_name}.first_upload_date),
+            first_video_id=COALESCE(EXCLUDED.first_video_id, {table_name}.first_video_id),
+            first_video_published_at=COALESCE(EXCLUDED.first_video_published_at, {table_name}.first_video_published_at),
+            first_video_checked_at=COALESCE(EXCLUDED.first_video_checked_at, {table_name}.first_video_checked_at),
+            first_video_last_attempt_at=COALESCE(EXCLUDED.first_video_last_attempt_at, {table_name}.first_video_last_attempt_at),
+            first_video_status=CASE
+                WHEN EXCLUDED.first_video_status IN ('success', 'no_public_videos')
+                    THEN EXCLUDED.first_video_status
+                ELSE {table_name}.first_video_status
+            END,
+            first_video_source=COALESCE(EXCLUDED.first_video_source, {table_name}.first_video_source),
+            first_video_last_error=EXCLUDED.first_video_last_error,
+            first_video_claimed_at=EXCLUDED.first_video_claimed_at,
             extracted_at=EXCLUDED.extracted_at
     """, 
         url,
@@ -694,9 +743,120 @@ async def upsert_channel_raw(channel: dict[str, Any]) -> None:
         channel.get("uploader_id"),
         channel.get("uploader_url"),
         channel.get("last_upload_date"),
-        channel.get("first_upload_date"),
+        channel.get("first_video_id"),
+        _ensure_datetime(channel.get("first_video_published_at")),
+        _ensure_datetime(channel.get("first_video_checked_at")),
+        _ensure_datetime(channel.get("first_video_last_attempt_at")),
+        channel.get("first_video_status") or "pending",
+        channel.get("first_video_source"),
+        channel.get("first_video_last_error"),
+        _ensure_datetime(channel.get("first_video_claimed_at")),
         _ensure_datetime(channel.get("extracted_at")) or _utcnow()
     )
+
+
+async def update_first_video_success(
+    channel_url: str,
+    *,
+    video_id: str,
+    published_at: datetime | str,
+    source: str,
+    checked_at: datetime | None = None,
+) -> None:
+    """Persist a successful first-video result atomically."""
+    table_name = _get_table_name("channels_raw")
+    now = checked_at or _utcnow()
+    await _require_pool().execute(f"""
+        UPDATE {table_name}
+        SET first_video_id = $2,
+            first_video_published_at = $3,
+            first_video_checked_at = $4,
+            first_video_last_attempt_at = $4,
+            first_video_status = 'success',
+            first_video_source = $5,
+            first_video_last_error = NULL,
+            first_video_claimed_at = NULL
+        WHERE channel_url = $1
+    """, channel_url, video_id, _ensure_datetime(published_at), now, source)
+
+
+async def update_first_video_no_public(
+    channel_url: str,
+    *,
+    reason: str,
+    checked_at: datetime | None = None,
+) -> None:
+    """Mark an explicitly empty Videos tab as a terminal result."""
+    table_name = _get_table_name("channels_raw")
+    now = checked_at or _utcnow()
+    await _require_pool().execute(f"""
+        UPDATE {table_name}
+        SET first_video_id = NULL,
+            first_video_published_at = NULL,
+            first_video_checked_at = $3,
+            first_video_last_attempt_at = $3,
+            first_video_status = 'no_public_videos',
+            first_video_source = NULL,
+            first_video_last_error = $2,
+            first_video_claimed_at = NULL
+        WHERE channel_url = $1
+    """, channel_url, reason[:2000], now)
+
+
+async def update_first_video_failure(
+    channel_url: str,
+    *,
+    error: str,
+    attempted_at: datetime | None = None,
+) -> None:
+    """Return a failed enrichment to pending for a future run."""
+    table_name = _get_table_name("channels_raw")
+    await _require_pool().execute(f"""
+        UPDATE {table_name}
+        SET first_video_status = 'pending',
+            first_video_last_attempt_at = $3,
+            first_video_last_error = $2,
+            first_video_claimed_at = NULL
+        WHERE channel_url = $1
+          AND first_video_status <> 'success'
+    """, channel_url, error[:2000], attempted_at or _utcnow())
+
+
+async def claim_channels_for_first_video_enrichment(
+    limit: int,
+    *,
+    stale_after_minutes: int = 60,
+) -> list[dict[str, str]]:
+    """Atomically claim pending enrichment rows, including stale workers."""
+    if limit <= 0:
+        return []
+    table_name = _get_table_name("channels_raw")
+    rows = await _require_pool().fetch(f"""
+        WITH candidates AS (
+            SELECT channel_url
+            FROM {table_name}
+            WHERE channel_id IS NOT NULL
+              AND (
+                  first_video_status = 'pending'
+                  OR (
+                      first_video_status = 'processing'
+                      AND first_video_claimed_at < CURRENT_TIMESTAMP
+                          - ($2::INTEGER * INTERVAL '1 minute')
+                  )
+              )
+            ORDER BY first_video_last_attempt_at NULLS FIRST, channel_url
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+        )
+        UPDATE {table_name} AS channel
+        SET first_video_status = 'processing',
+            first_video_claimed_at = CURRENT_TIMESTAMP,
+            first_video_last_attempt_at = CURRENT_TIMESTAMP
+        FROM candidates
+        WHERE channel.channel_url = candidates.channel_url
+        RETURNING channel.channel_url, channel.channel_id
+    """, limit, stale_after_minutes)
+    return [dict(row) for row in rows]
 
 
 async def upsert_channel_videos_raw(channel_url: str, videos: list[dict[str, Any]]) -> tuple[int, int]:

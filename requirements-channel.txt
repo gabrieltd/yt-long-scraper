@@ -1,2 +1,3 @@
 asyncpg
 python-dotenv
+requests

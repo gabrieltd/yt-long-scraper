@@ -22,6 +22,7 @@ Dependencias principales (ver [requirements.txt](requirements.txt)):
 - `yt-dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
 - `asyncpg`
 - `python-dotenv`
+- `requests`
 - `streamlit`
 - `pandas`
 
@@ -104,6 +105,9 @@ python yt_normalization_validation.py
 ```bash
 # usa el yt-dlp local vendorizado en yt-dlp/yt-dlp
 python yt_channel_discovery.py
+
+# reintenta sólo canales cuya fecha del primer video quedó pendiente
+python yt_first_video_enrichment.py --workers 5
 ```
 
 **Análisis de canal:**

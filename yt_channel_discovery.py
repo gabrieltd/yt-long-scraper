@@ -29,6 +29,14 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 from dotenv import load_dotenv
 
+from youtube_oldest_video import (
+	FirstVideoMetadata,
+	NoPublicVideosError,
+	OldestVideoError,
+	YouTubeOldestVideoClient,
+	fetch_first_video_with_ytdlp,
+)
+
 from db import (
 	claim_channels_for_discovery,
 	close_db,
@@ -52,7 +60,7 @@ MAX_WORKERS = 6
 
 
 # Number of channels to claim per DB round-trip.
-DISCOVERY_BATCH_SIZE = 200
+DISCOVERY_BATCH_SIZE = 500
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -177,6 +185,62 @@ def _coerce_bool(value: Any) -> bool | None:
 
 def _string_or_none(value: Any) -> str | None:
 	return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def resolve_first_video(
+	channel_url: str,
+	channel_id: str,
+	client: YouTubeOldestVideoClient,
+	*,
+	fallback_timeout_seconds: int = 180,
+) -> dict[str, Any]:
+	"""Resolve first-video metadata, using yt-dlp only after an individual failure."""
+	attempted_at = _utcnow()
+	try:
+		metadata = client.fetch_first_video(channel_id)
+	except NoPublicVideosError as exc:
+		return {
+			"first_video_status": "no_public_videos",
+			"first_video_checked_at": attempted_at,
+			"first_video_last_attempt_at": attempted_at,
+			"first_video_last_error": str(exc),
+		}
+	except OldestVideoError as primary_error:
+		try:
+			metadata = fetch_first_video_with_ytdlp(
+				channel_url,
+				expected_channel_id=channel_id,
+				known_video_id=primary_error.video_id,
+				timeout_seconds=fallback_timeout_seconds,
+				project_root=PROJECT_ROOT,
+			)
+		except NoPublicVideosError as exc:
+			return {
+				"first_video_status": "no_public_videos",
+				"first_video_checked_at": attempted_at,
+				"first_video_last_attempt_at": attempted_at,
+				"first_video_last_error": str(exc),
+			}
+		except OldestVideoError as fallback_error:
+			return {
+				"first_video_status": "pending",
+				"first_video_last_attempt_at": attempted_at,
+				"first_video_last_error": (
+					f"Innertube: {primary_error}; yt-dlp: {fallback_error}"
+				),
+			}
+
+	if not isinstance(metadata, FirstVideoMetadata):
+		raise RuntimeError("First-video resolver returned an invalid result")
+	return {
+		"first_video_id": metadata.video_id,
+		"first_video_published_at": metadata.published_at,
+		"first_video_checked_at": attempted_at,
+		"first_video_last_attempt_at": attempted_at,
+		"first_video_status": "success",
+		"first_video_source": metadata.source,
+		"first_video_last_error": None,
+	}
 
 
 def _best_thumbnail_url(thumbnails: Any, *, kind: str) -> str | None:
@@ -375,7 +439,6 @@ def parse_channel_raw(
 	dump: dict[str, Any],
 	*,
 	last_upload_date: str | None = None,
-	first_upload_date: str | None = None,
 ) -> dict[str, Any]:
 	"""Extract raw channel metadata from a yt-dlp dump.
 
@@ -413,7 +476,7 @@ Missing fields are left as None.
 		"uploader_id": _string_or_none(dump.get("uploader_id")),
 		"uploader_url": _string_or_none(dump.get("uploader_url")),
 		"last_upload_date": last_upload_date,
-		"first_upload_date": first_upload_date,
+		"first_video_status": "pending",
 		"extracted_at": _utcnow(),
 	}
 
@@ -508,14 +571,16 @@ def process_one_channel(
 	channel_url: str,
 	db: _DBRunner,
 	*,
+	oldest_video_client: YouTubeOldestVideoClient | None = None,
+	oldest_video_client_error: str | None = None,
 	max_videos: int = 60,
 	timeout_seconds: int = 180,
 	# Note: DB operations are executed on the db runner loop.
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str | None]:
 	"""Process a single channel (ONE job = ONE channel).
 
 Returns:
-	(channel_url, status)
+	(channel_url, discovery_status, first_video_status, first_video_source)
 
 	status is one of:
 	- "processed": yt-dlp ok, persisted, and marked in channels_processed
@@ -524,12 +589,12 @@ Returns:
 """
 	if not channel_url:
 		# Defensive: empty URL is a failed unit of work.
-		return (channel_url, "failed")
+		return (channel_url, "failed", "pending", None)
 
 	# Idempotency check: if already processed, skip.
 	if bool(db.run(is_channel_processed(channel_url))):
 		print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][skip] already processed: {channel_url}\033[0m")
-		return (channel_url, "skipped")
+		return (channel_url, "skipped", "pending", None)
 
 	try:
 		# 1) Fetch real channel data with yt-dlp (subprocess).
@@ -564,20 +629,31 @@ Returns:
 			# Store last_upload_date on the channel row.
 			channel_row["last_upload_date"] = last_upload_date
 
-		# 3b) Derive first_upload_date from the oldest non-Short video.
-		#     Shorts typically have duration <= 60s.
-		oldest_date: str | None = None
-		for vrow in video_rows:
-			vdate = vrow.get("upload_date")
-			if not vdate:
-				continue
-			dur = vrow.get("duration_seconds")
-			# Skip Shorts (duration <= 60s) when available
-			if dur is not None and dur <= 60:
-				continue
-			if oldest_date is None or vdate < oldest_date:
-				oldest_date = vdate
-		channel_row["first_upload_date"] = oldest_date
+		# 3b) Resolve the actual oldest public entry from the channel's Videos tab.
+		if oldest_video_client is not None and channel_id:
+			first_video = resolve_first_video(
+				channel_url,
+				channel_id,
+				oldest_video_client,
+				fallback_timeout_seconds=timeout_seconds,
+			)
+			channel_row.update(first_video)
+			first_status = first_video["first_video_status"]
+			if first_status == "success":
+				print(
+					f"\033[96m[{_utcnow().strftime('%H:%M:%S')}][first-video] "
+					f"{channel_url}: {first_video['first_video_id']} "
+					f"via {first_video['first_video_source']}\033[0m"
+				)
+			elif first_status == "no_public_videos":
+				print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][first-video-empty] {channel_url}\033[0m")
+			else:
+				print(
+					f"\033[91m[{_utcnow().strftime('%H:%M:%S')}][first-video-error] "
+					f"{channel_url}: {first_video.get('first_video_last_error')}\033[0m"
+				)
+		elif oldest_video_client_error:
+			channel_row["first_video_last_error"] = oldest_video_client_error
 
 		# 4) Persist raw data via db.py (async), executed on the DB loop thread.
 		db.run(upsert_channel_raw(channel_row))
@@ -585,7 +661,12 @@ Returns:
 		# 5) Mark processed ONLY after successful fetch + persistence.
 		db.run(mark_channel_processed(channel_url, status="success"))
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][ok] processed: {channel_url} (videos={len(video_rows)})\033[0m")
-		return (channel_url, "processed")
+		return (
+			channel_url,
+			"processed",
+			channel_row.get("first_video_status", "pending"),
+			channel_row.get("first_video_source"),
+		)
 	except Exception as e:
 		msg = str(e)
 		# Detect permanent failures (604 / channel gone / blocking).
@@ -595,11 +676,11 @@ Returns:
 			print(f"\033[91m[{_utcnow().strftime('%H:%M:%S')}][failed-permanent] {channel_url}: Marking as failed. Reason: {msg[:100]}\033[0m")
 			# Mark as processed so we don't retry. Status = "failed".
 			db.run(mark_channel_processed(channel_url, status="failed"))
-			return (channel_url, "failed")
+			return (channel_url, "failed", "pending", None)
 
 		# Transient failure: do NOT mark as processed. Retry next time.
 		print(f"\033[91m[{_utcnow().strftime('%H:%M:%S')}][error] {channel_url}: {e}\033[0m")
-		return (channel_url, "failed")
+		return (channel_url, "failed", "pending", None)
 
 
 def run(
@@ -608,6 +689,7 @@ def run(
 	max_videos: int = 50,
 	dsn: str | None = None,
 	timeout_seconds: int = 180,
+	first_video_timeout_seconds: int = 20,
 	language: str = "es",
 ) -> None:
 	"""Main orchestration: fetch candidates -> process in parallel workers.
@@ -625,10 +707,30 @@ def run(
 		# Use a small pool size to allow high parallelism of jobs (e.g. 20 jobs * 4 conn = 80 total).
 		db.run(init_db(dsn, min_size=1, max_size=4, language=language))
 		print(f"\033[92m[info] running workers: max_workers={MAX_WORKERS}\033[0m")
+		oldest_video_client: YouTubeOldestVideoClient | None = None
+		oldest_video_client_error: str | None = None
+		try:
+			oldest_video_client = YouTubeOldestVideoClient.initialize(
+				timeout_seconds=first_video_timeout_seconds
+			)
+			print("\033[92m[info] YouTube first-video client initialized\033[0m")
+		except OldestVideoError as exc:
+			oldest_video_client_error = str(exc)
+			print(
+				"\033[91m[warning] first-video enrichment disabled for this run: "
+				f"{exc}\033[0m"
+			)
 
 		processed = 0
 		skipped = 0
 		failed = 0
+		first_video_counts = {
+			"success": 0,
+			"no_public_videos": 0,
+			"pending": 0,
+			"innertube": 0,
+			"yt_dlp": 0,
+		}
 
 		remaining = limit_channels
 		while True:
@@ -656,6 +758,8 @@ def run(
 							process_one_channel,
 							channel_url,
 							db,
+							oldest_video_client=oldest_video_client,
+							oldest_video_client_error=oldest_video_client_error,
 							max_videos=max_videos,
 							timeout_seconds=timeout_seconds,
 						): channel_url
@@ -664,9 +768,12 @@ def run(
 
 					# Consume results as they complete (out-of-order completion is expected).
 					for future in as_completed(futures):
-						channel_url, status = future.result()
+						channel_url, status, first_status, first_source = future.result()
 						if status == "processed":
 							processed += 1
+							first_video_counts[first_status] = first_video_counts.get(first_status, 0) + 1
+							if first_source:
+								first_video_counts[first_source] = first_video_counts.get(first_source, 0) + 1
 						elif status == "skipped":
 							skipped += 1
 						else:
@@ -687,6 +794,14 @@ def run(
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
+		print(
+			f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][first-video-totals] "
+			f"success={first_video_counts['success']} "
+			f"empty={first_video_counts['no_public_videos']} "
+			f"pending={first_video_counts['pending']} "
+			f"innertube={first_video_counts['innertube']} "
+			f"yt-dlp={first_video_counts['yt_dlp']}\033[0m"
+		)
 	finally:
 		# Ensure pool is closed on the DB loop thread.
 		try:
@@ -704,6 +819,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	p.add_argument("--limit-channels", type=int, default=None, help="Max channels to process (default: no limit)")
 	p.add_argument("--max-videos", type=int, default=60)
 	p.add_argument("--timeout-seconds", type=int, default=180)
+	p.add_argument("--first-video-timeout-seconds", type=int, default=20)
 	p.add_argument(
 		"--dsn",
 		type=str,
@@ -728,5 +844,6 @@ if __name__ == "__main__":
 		max_videos=args.max_videos,
 		dsn=args.dsn,
 		timeout_seconds=args.timeout_seconds,
+		first_video_timeout_seconds=args.first_video_timeout_seconds,
 		language=args.lang,
 	)

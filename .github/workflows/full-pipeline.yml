@@ -183,6 +183,41 @@ jobs:
           echo "Running: $CMD"
           $CMD
 
+  first-video-enrichment:
+    needs: [prepare-channel-matrix, channel-discovery]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-channel.txt
+          python -m pip install -e "./yt-dlp/yt-dlp[default]"
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
+      - name: Retry pending first-video enrichment
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          CMD="python yt_first_video_enrichment.py --workers 5"
+          if [ "${{ inputs.language }}" = "EN" ]; then
+            CMD="$CMD --EN"
+          else
+            CMD="$CMD --ES"
+          fi
+          $CMD
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 2 – Normalization & Validation
 # ─────────────────────────────────────────────────────────────────────────────

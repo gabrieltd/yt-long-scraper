@@ -66,6 +66,12 @@ Campos:
 - `channel_name` (TEXT)
 - `subscriber_count` (BIGINT)
 - `is_verified` (BOOLEAN)
+- `first_video_id` (TEXT)
+- `first_video_published_at` (TIMESTAMPTZ)
+- `first_video_checked_at` (TIMESTAMPTZ)
+- `first_video_status` (TEXT: `pending`, `processing`, `success`, `no_public_videos`)
+- `first_video_source` (TEXT: `innertube` o `yt_dlp`)
+- `first_video_last_error` (TEXT)
 - `extracted_at` (TIMESTAMPTZ)
 
 ### `channel_videos_raw`

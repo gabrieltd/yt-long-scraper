@@ -60,10 +60,18 @@ Archivo: [yt_channel_discovery.py](../yt_channel_discovery.py)
 - Para cada canal en paralelo (Workers):
   - Ejecuta `python -m yt_dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
   - Resuelve `yt_dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
+  - Obtiene el primer video público desde el orden `Oldest` de `/videos`
+  - Si falla una consulta individual, usa `yt-dlp` sobre el video conocido o `--playlist-items -1`
   - Persiste:
     - `channels_raw` (metadata de canal)
     - `channel_videos_raw` (últimos N videos del canal)
     - `channels_processed` (marca idempotente; `success` o `failed`)
 
 Salida: tablas `channels_raw`, `channel_videos_raw`, `channels_processed`.
+
+Los resultados pendientes se reintentan sin repetir el descubrimiento del canal:
+
+```bash
+python yt_first_video_enrichment.py --workers 5
+```
 

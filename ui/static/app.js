@@ -71,6 +71,13 @@ function fmtDate(yyyymmdd) {
     return `${y}-${m}-${d}`;
 }
 
+function fmtIsoDate(value) {
+    if (!value) return "–";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "–";
+    return parsed.toISOString().slice(0, 10);
+}
+
 function fmtDuration(seconds) {
     if (seconds == null || !Number.isFinite(Number(seconds))) return "–";
     const total = Math.max(0, Math.floor(Number(seconds)));
@@ -132,11 +139,11 @@ function getFilterParams() {
     const beforeVal = $("#fLastUploadedBefore").value;
     if (beforeVal) p.set("last_uploaded_before", beforeVal.replace(/-/g, ""));
 
-    // First upload date filters
-    const firstAfterVal = $("#fFirstUploadedAfter").value;
-    if (firstAfterVal) p.set("first_uploaded_after", firstAfterVal.replace(/-/g, ""));
-    const firstBeforeVal = $("#fFirstUploadedBefore").value;
-    if (firstBeforeVal) p.set("first_uploaded_before", firstBeforeVal.replace(/-/g, ""));
+    // Exact first-video date filters (inclusive UTC calendar days)
+    const firstAfterVal = $("#fFirstVideoAfter").value;
+    if (firstAfterVal) p.set("first_video_after", firstAfterVal);
+    const firstBeforeVal = $("#fFirstVideoBefore").value;
+    if (firstBeforeVal) p.set("first_video_before", firstBeforeVal);
 
     const verified = $("#fIsVerified").value;
     if (verified !== "") p.set("is_verified", verified);
@@ -228,7 +235,7 @@ function renderTable() {
             <td class="num">${fmtAvg(ch.avg_views_on_channel)}</td>
             <td class="num">${fmt(ch.max_views_on_channel)}</td>
             <td class="num date-cell">${fmtDate(ch.last_upload_date)}</td>
-            <td class="num date-cell">${fmtDate(ch.first_upload_date)}</td>
+            <td class="num date-cell">${fmtIsoDate(ch.first_video_published_at)}</td>
             <td><span class="relevance-badge ${relClass}">${relLabel}</span>${tagsHtml}</td>
             <td>
                 <div class="action-btns">
@@ -309,6 +316,10 @@ function detailMetric(label, value) {
     return `<div class="detail-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
+function detailMetricHtml(label, valueHtml) {
+    return `<div class="detail-metric"><span>${escapeHtml(label)}</span><strong>${valueHtml}</strong></div>`;
+}
+
 function renderDrawer(details) {
     const ch = details.channel;
     const relClass = ch.is_relevant === true ? "relevant" : ch.is_relevant === false ? "not-relevant" : "unmarked";
@@ -341,6 +352,10 @@ function renderDrawer(details) {
         }).join("")
         : `<p class="drawer-muted">No tracked videos yet.</p>`;
     const encodedUrl = encodeURIComponent(ch.channel_url);
+    const firstVideoDate = fmtIsoDate(ch.first_video_published_at);
+    const firstVideoValue = ch.first_video_id
+        ? `<a href="https://www.youtube.com/watch?v=${encodeURIComponent(ch.first_video_id)}" target="_blank" rel="noopener">${escapeHtml(firstVideoDate)}</a>`
+        : escapeHtml(firstVideoDate);
 
     drawerContent.innerHTML = `
         <div class="drawer-topbar">
@@ -373,7 +388,7 @@ function renderDrawer(details) {
                 ${detailMetric("Avg views", fmtAvg(ch.avg_views_on_channel))}
                 ${detailMetric("Max views", fmt(ch.max_views_on_channel))}
                 ${detailMetric("Last upload", fmtDate(ch.last_upload_date))}
-                ${detailMetric("First upload", fmtDate(ch.first_upload_date))}
+                ${detailMetricHtml("First video", firstVideoValue)}
             </div>
         </section>
         ${ch.channel_description ? `<p class="drawer-description">${escapeHtml(ch.channel_description).replace(/\n/g, "<br>")}</p>` : ""}
@@ -573,8 +588,8 @@ btnReset.addEventListener("click", () => {
     $("#fMaxSubscribers").value = "";
     $("#fLastUploadedAfter").value = "";
     $("#fLastUploadedBefore").value = "";
-    $("#fFirstUploadedAfter").value = "";
-    $("#fFirstUploadedBefore").value = "";
+    $("#fFirstVideoAfter").value = "";
+    $("#fFirstVideoBefore").value = "";
     $("#fIsVerified").value = "";
     $("#fChannelName").value = "";
     $("#fRelevance").value = "all";

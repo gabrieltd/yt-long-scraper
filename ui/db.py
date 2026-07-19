@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import base64
 import json
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -25,7 +26,7 @@ VALID_SORT_COLUMNS = {
     "max_views_on_channel",
     "is_relevant",
     "last_upload_date",
-    "first_upload_date",
+    "first_video_published_at",
 }
 
 
@@ -70,6 +71,8 @@ def _encode_cursor(sort_by: str, sort_order: str, row: asyncpg.Record) -> str:
     value = row[sort_by]
     if isinstance(value, Decimal):
         value = str(value)
+    elif isinstance(value, (date, datetime)):
+        value = value.isoformat()
     payload = {
         "sort_by": sort_by,
         "sort_order": sort_order,
@@ -91,7 +94,23 @@ def _decode_cursor(cursor: str, sort_by: str, sort_order: str) -> tuple[Any, str
     channel_url = payload.get("channel_url")
     if not isinstance(channel_url, str) or not channel_url:
         raise ValueError("Invalid pagination cursor")
-    return payload.get("value"), channel_url
+    value = payload.get("value")
+    if sort_by == "first_video_published_at" and isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Invalid pagination cursor timestamp") from exc
+    return value, channel_url
+
+
+def _utc_day_boundary(value: str, *, next_day: bool = False) -> datetime:
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid date: {value}") from exc
+    if next_day:
+        parsed += timedelta(days=1)
+    return datetime.combine(parsed, time.min, tzinfo=timezone.utc)
 
 
 async def get_filtered_channels(
@@ -111,8 +130,8 @@ async def get_filtered_channels(
     tag_filter: str | None = None,
     last_uploaded_after: str | None = None,
     last_uploaded_before: str | None = None,
-    first_uploaded_after: str | None = None,
-    first_uploaded_before: str | None = None,
+    first_video_after: str | None = None,
+    first_video_before: str | None = None,
     sort_by: str = "hit_videos_count",
     sort_order: str = "desc",
     cursor: str | None = None,
@@ -169,10 +188,14 @@ async def get_filtered_channels(
         where_clauses.append(f"last_upload_date >= {_next(last_uploaded_after)}")
     if last_uploaded_before:
         where_clauses.append(f"last_upload_date <= {_next(last_uploaded_before)}")
-    if first_uploaded_after:
-        where_clauses.append(f"first_upload_date >= {_next(first_uploaded_after)}")
-    if first_uploaded_before:
-        where_clauses.append(f"first_upload_date <= {_next(first_uploaded_before)}")
+    if first_video_after:
+        where_clauses.append(
+            f"first_video_published_at >= {_next(_utc_day_boundary(first_video_after))}"
+        )
+    if first_video_before:
+        where_clauses.append(
+            f"first_video_published_at < {_next(_utc_day_boundary(first_video_before, next_day=True))}"
+        )
 
     if cursor:
         cursor_value, cursor_channel_url = _decode_cursor(cursor, sort_by, sort_order)
@@ -200,7 +223,9 @@ async def get_filtered_channels(
                 cr.subscriber_count,
                 cr.is_verified,
                 cr.last_upload_date,
-                cr.first_upload_date,
+                cr.first_video_id,
+                cr.first_video_published_at,
+                cr.first_video_status,
                 stats.total_videos_tracked,
                 {hit_expression} AS hit_videos_count,
                 stats.avg_views_on_channel,
@@ -233,7 +258,12 @@ async def get_filtered_channels(
             "subscriber_count": row["subscriber_count"],
             "is_verified": row["is_verified"],
             "last_upload_date": row["last_upload_date"],
-            "first_upload_date": row["first_upload_date"],
+            "first_video_id": row["first_video_id"],
+            "first_video_published_at": (
+                row["first_video_published_at"].isoformat()
+                if row["first_video_published_at"] else None
+            ),
+            "first_video_status": row["first_video_status"],
             "total_videos_tracked": row["total_videos_tracked"],
             "hit_videos_count": row["hit_videos_count"],
             "avg_views_on_channel": float(row["avg_views_on_channel"]) if row["avg_views_on_channel"] is not None else 0,
@@ -278,7 +308,9 @@ async def get_channel_details(
             cr.uploader_id,
             cr.uploader_url,
             cr.last_upload_date,
-            cr.first_upload_date,
+            cr.first_video_id,
+            cr.first_video_published_at,
+            cr.first_video_status,
             stats.total_videos_tracked,
             count_channel_views_in_range(stats.view_counts, $2, $3) AS hit_videos_count,
             stats.avg_views_on_channel,
@@ -322,7 +354,12 @@ async def get_channel_details(
         "uploader_id": channel_row["uploader_id"],
         "uploader_url": channel_row["uploader_url"],
         "last_upload_date": channel_row["last_upload_date"],
-        "first_upload_date": channel_row["first_upload_date"],
+        "first_video_id": channel_row["first_video_id"],
+        "first_video_published_at": (
+            channel_row["first_video_published_at"].isoformat()
+            if channel_row["first_video_published_at"] else None
+        ),
+        "first_video_status": channel_row["first_video_status"],
         "total_videos_tracked": channel_row["total_videos_tracked"],
         "hit_videos_count": channel_row["hit_videos_count"],
         "avg_views_on_channel": float(channel_row["avg_views_on_channel"]) if channel_row["avg_views_on_channel"] is not None else 0,
