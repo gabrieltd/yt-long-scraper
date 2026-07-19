@@ -5,11 +5,122 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 import db
 from dotenv import load_dotenv
-import os
+
+
+BLOCKED_RESOURCE_TYPES = {"font", "image", "media"}
+SCROLL_WAIT_TIMEOUT_MS = 2_000
+
+
+async def _result_state(page, no_more_message: str) -> dict[str, int | bool]:
+	return await page.evaluate(
+		"""
+		(message) => ({
+			count: document.querySelectorAll('ytd-video-renderer').length,
+			noMore: Array.from(document.querySelectorAll('yt-formatted-string'))
+				.some(node => node.textContent?.includes(message))
+		})
+		""",
+		no_more_message,
+	)
+
+
+async def _wait_for_result_change(
+	page,
+	*,
+	previous_count: int,
+	no_more_message: str,
+) -> dict[str, int | bool]:
+	"""Wait only as long as YouTube needs to append the next result batch."""
+	try:
+		await page.wait_for_function(
+			"""
+			([count, message]) =>
+				document.querySelectorAll('ytd-video-renderer').length > count ||
+				Array.from(document.querySelectorAll('yt-formatted-string'))
+					.some(node => node.textContent?.includes(message))
+			""",
+			arg=[previous_count, no_more_message],
+			timeout=SCROLL_WAIT_TIMEOUT_MS,
+			polling=100,
+		)
+	except PlaywrightTimeoutError:
+		pass
+	return await _result_state(page, no_more_message)
+
+
+async def _scroll_until_complete(
+	page,
+	*,
+	limit: int | None,
+	no_more_message: str,
+	max_scroll_seconds: int = 300,
+	max_stale_scrolls: int = 5,
+) -> int:
+	"""Load search results until the requested boundary or YouTube exhaustion."""
+	started_at = asyncio.get_running_loop().time()
+	stale_scrolls = 0
+	state = await _result_state(page, no_more_message)
+	previous_count = int(state["count"])
+
+	while True:
+		current_count = int(state["count"])
+		if limit is not None and current_count >= max(0, limit):
+			return current_count
+		if state["noMore"]:
+			return current_count
+
+		await page.evaluate(
+			"window.scrollTo(0, document.documentElement.scrollHeight);"
+		)
+		state = await _wait_for_result_change(
+			page,
+			previous_count=previous_count,
+			no_more_message=no_more_message,
+		)
+		current_count = int(state["count"])
+		elapsed = asyncio.get_running_loop().time() - started_at
+		if elapsed >= max_scroll_seconds:
+			print(
+				f"⚠️ Scroll timeout after {int(elapsed)}s — "
+				"collecting results found so far."
+			)
+			return current_count
+
+		if current_count <= previous_count:
+			stale_scrolls += 1
+			if stale_scrolls >= max_stale_scrolls:
+				print(
+					f"⚠️ No new results after {max_stale_scrolls} scrolls "
+					f"({current_count} videos) — stopping scroll."
+				)
+				return current_count
+		else:
+			stale_scrolls = 0
+		previous_count = current_count
+
+
+async def _save_debug_artifacts(
+	page,
+	*,
+	screenshot_name: str | None = None,
+	include_html: bool = True,
+) -> None:
+	"""Best-effort diagnostics that never turn a scrape result into a failure."""
+	try:
+		debug_dir = Path("debug")
+		debug_dir.mkdir(parents=True, exist_ok=True)
+		if screenshot_name:
+			await page.screenshot(path=str(debug_dir / screenshot_name), full_page=True)
+		if include_html:
+			html = await page.content()
+			(debug_dir / "03_html.html").write_text(html, encoding="utf-8")
+	except Exception as exc:
+		print(f"⚠️ Could not write debug artifacts: {exc}")
 
 # Language configuration for bilingual support
 LANG_CONFIG = {
@@ -119,7 +230,8 @@ async def run(
     upload_date: str | None = None,
     duration: str | None = None,
     features: list[str] | None = None,
-    sort_by: str | None = None
+    sort_by: str | None = None,
+    debug_artifacts: bool = False,
 ) -> list[dict]:
 	# Force UTF-8 output to handle emojis on Windows CI
 	sys.stdout.reconfigure(encoding='utf-8')
@@ -148,18 +260,27 @@ async def run(
 			},
 		)
 
+		async def _route_handler(route) -> None:
+			if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
+				await route.abort()
+			else:
+				await route.continue_()
+
+		await context.route("**/*", _route_handler)
+
 		page = await context.new_page()
-		os.makedirs("debug", exist_ok=True)
 
 		try:
 			await page.goto(
 				f"https://www.youtube.com/results?search_query={quote(query)}",
 				wait_until="domcontentloaded",
 			)
-			await page.screenshot(
-				path="debug/01_after_goto.png",
-				full_page=True
-			)
+			if debug_artifacts:
+				await _save_debug_artifacts(
+					page,
+					screenshot_name="01_after_goto.png",
+					include_html=False,
+				)
 		
 			# Apply UI-driven filters based on user arguments
 			filters_button = config["ui"]["search_filters"]
@@ -196,47 +317,13 @@ async def run(
 					await page.get_by_role("link", name=filter_text).click()
 					await page.wait_for_timeout(800)
 
-			# Scroll to bottom until 'No more results' message is found
-			# Safety: max scroll time (5 min) and stale detection (no new videos after N scrolls)
-			no_more_msg = config["ui"]["no_more_results"]
-			_scroll_start = asyncio.get_event_loop().time()
-			_MAX_SCROLL_SECONDS = 300  # 5 minutes
-			_prev_count = 0
-			_stale_scrolls = 0
-			_MAX_STALE = 5  # break after 5 consecutive scrolls with no new videos
-			_SCROLL_PAUSE_SECONDS = 2
-
-			while True:
-				# Scroll to the current bottom of the document to trigger YouTube's infinite loader.
-				await page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight);")
-				# Wait for results to load
-				await asyncio.sleep(_SCROLL_PAUSE_SECONDS)
-
-				# Check for 'No more results' message (supports both languages)
-				no_more_results = await page.locator(
-					f"xpath=//yt-formatted-string[contains(text(), '{no_more_msg}')]"
-				).count()
-				if no_more_results > 0:
-					break
-
-				# Timeout: break if scrolling for too long
-				elapsed = asyncio.get_event_loop().time() - _scroll_start
-				if elapsed >= _MAX_SCROLL_SECONDS:
-					print(f"⚠️ Scroll timeout after {int(elapsed)}s — collecting results found so far.")
-					break
-
-				# Stale detection: if no new videos loaded after several scrolls, stop
-				cur_count = await page.locator("ytd-video-renderer").count()
-				if cur_count <= _prev_count:
-					_stale_scrolls += 1
-					if _stale_scrolls >= _MAX_STALE:
-						print(f"⚠️ No new results after {_MAX_STALE} scrolls ({cur_count} videos) — stopping scroll.")
-						break
-				else:
-					_stale_scrolls = 0
-				_prev_count = cur_count
-
 			await page.wait_for_selector("ytd-video-renderer")
+
+			await _scroll_until_complete(
+				page,
+				limit=limit,
+				no_more_message=config["ui"]["no_more_results"],
+			)
 
 			results: list[dict] = await page.evaluate(
 				"""
@@ -301,20 +388,20 @@ async def run(
 			if limit is not None:
 				return results[: max(0, limit)]
 			return results
-		except: 
-			await page.screenshot(
-				path="debug/02_no_filters_button.png",
-				full_page=True
+		except Exception as exc:
+			print(f"⚠️ YouTube discovery failed for {query!r}: {exc}")
+			await _save_debug_artifacts(
+				page,
+				screenshot_name="02_no_filters_button.png",
 			)
 			return []
 		finally:
-			html = await page.content()
-			with open("debug/03_html.html", "w", encoding="utf-8") as f:
-				f.write(html)
+			if debug_artifacts:
+				await _save_debug_artifacts(page)
 			await browser.close()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 		parser = argparse.ArgumentParser(description="Scrape YouTube search results via Playwright")
 		parser.add_argument("--query", "-q", default="documental", help="YouTube search query")
 		parser.add_argument(
@@ -346,6 +433,17 @@ def parse_args() -> argparse.Namespace:
 				default=None,
 				help="Write JSON output to a file instead of stdout",
 		)
+		parser.add_argument(
+				"--debug-artifacts",
+				action="store_true",
+				help="Write screenshots and page HTML under debug/",
+		)
+		parser.add_argument(
+				"--skip-schema",
+				action="store_false",
+				dest="ensure_schema",
+				help="Skip idempotent schema setup when a parent runner already applied it",
+		)
 		
 		# Language selection
 		lang_group = parser.add_mutually_exclusive_group()
@@ -363,7 +461,7 @@ def parse_args() -> argparse.Namespace:
 				dest="lang",
 				help="Use Spanish (es-MX) interface (default)",
 		)
-		parser.set_defaults(lang="es-MX")
+		parser.set_defaults(lang="es-MX", ensure_schema=True)
 		
 		# YouTube search filters
 		parser.add_argument(
@@ -392,7 +490,7 @@ def parse_args() -> argparse.Namespace:
 				help="Sort results by specific criteria",
 		)
 		
-		return parser.parse_args()
+		return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -407,7 +505,10 @@ def main() -> None:
 			language = "en" if args.lang == "en-US" else "es"
 			search_run_id = None
 			try:
-				await db.init_db(language=language)
+				await db.init_db(
+					language=language,
+					ensure_schema=args.ensure_schema,
+				)
 				search_run_id = await db.create_search_run(args.query, mode="exploration")
 				
 				results = await run(
@@ -418,7 +519,8 @@ def main() -> None:
 					upload_date=args.upload_date,
 					duration=args.duration,
 					features=args.features,
-					sort_by=args.sort_by
+					sort_by=args.sort_by,
+					debug_artifacts=args.debug_artifacts,
 				)
 				print(config["messages"]["scraping_completed"].format(len(results)))
 				inserted, ignored = await db.insert_videos_raw(search_run_id, results)

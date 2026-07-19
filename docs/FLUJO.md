@@ -58,7 +58,8 @@ Archivo: [yt_channel_discovery.py](../yt_channel_discovery.py)
   - `validation_passed = true`
   - excluye canales ya presentes en `channels_processed`
 - Para cada canal en paralelo (Workers):
-  - Ejecuta `python -m yt_dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
+  - Usa un pool persistente de procesos con la API Python de `yt-dlp`; cada proceso importa el source vendorizado una vez
+  - Mantiene `--ytdlp-mode subprocess` como rollback con el comando equivalente `python -m yt_dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
   - Reclama canales atómicamente, con propietario y recuperación de claims vencidos
   - Resuelve `yt_dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
   - Corrige las fechas aproximadas recientes con el feed RSS y conserva una fecha aproximada si el video ya salió de su ventana

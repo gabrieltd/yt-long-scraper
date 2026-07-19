@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
+import functools
 import json
 import multiprocessing
 import os
@@ -78,6 +80,28 @@ LOCAL_YTDLP_MAIN = LOCAL_YTDLP_ROOT / "yt_dlp" / "__main__.py"
 _STOP_EVENT = threading.Event()
 _ACTIVE_YTDLP_LOCK = threading.Lock()
 _ACTIVE_YTDLP_PROCESSES: set[subprocess.Popen[str]] = set()
+
+
+@functools.lru_cache(maxsize=16)
+def _ytdlp_api_options(max_videos: int, timeout_seconds: int) -> dict[str, Any]:
+	"""Parse the exact CLI options once per persistent yt-dlp worker process."""
+	if str(LOCAL_YTDLP_ROOT) not in sys.path:
+		sys.path.insert(0, str(LOCAL_YTDLP_ROOT))
+	from yt_dlp import parse_options
+
+	parsed = parse_options([
+		"--dump-single-json",
+		"--flat-playlist",
+		"--extractor-args",
+		"youtubetab:approximate_date",
+		"--playlist-end",
+		str(max(1, max_videos)),
+		"--socket-timeout",
+		str(timeout_seconds),
+		"--skip-download",
+		"--no-warnings",
+	])
+	return parsed.ydl_opts
 
 
 def _local_ytdlp_env() -> dict[str, str]:
@@ -159,16 +183,7 @@ def run_ytdlp_channel_dump_api(
 		sys.path.insert(0, str(LOCAL_YTDLP_ROOT))
 	from yt_dlp import YoutubeDL
 
-	options = {
-		"extract_flat": "in_playlist",
-		"extractor_args": {"youtubetab": {"approximate_date": [""]}},
-		"playlistend": max(1, max_videos),
-		"skip_download": True,
-		"quiet": True,
-		"no_warnings": True,
-		"simulate": True,
-		"socket_timeout": timeout_seconds,
-	}
+	options = copy.deepcopy(_ytdlp_api_options(max_videos, timeout_seconds))
 	with YoutubeDL(options) as ydl:
 		info = ydl.extract_info(channel_url + "/videos", download=False)
 		data = ydl.sanitize_info(info)
@@ -495,6 +510,8 @@ def run_ytdlp_channel_dump(
 		"youtubetab:approximate_date",
 		"--playlist-end",
 		str(max_videos),
+		"--socket-timeout",
+		str(timeout_seconds),
 		"--skip-download",
 		"--no-warnings",
 		channel_url_videos,
@@ -694,6 +711,7 @@ def process_one_channel(
 	ytdlp_executor: ProcessPoolExecutor | None = None,
 	max_videos: int = 60,
 	timeout_seconds: int = 180,
+	preclaimed: bool = False,
 	# Note: DB operations are executed on the db runner loop.
 ) -> tuple[str, str, str, str | None]:
 	"""Process a single channel (ONE job = ONE channel).
@@ -712,8 +730,9 @@ Returns:
 	if _STOP_EVENT.is_set():
 		return (channel_url, "failed", "pending", None)
 
-	# Idempotency check: if already processed, skip.
-	if bool(db.run(is_channel_processed(channel_url))):
+	# Atomic claims already exclude processed channels. Keep this check for
+	# independent callers that did not obtain the URL through the claim query.
+	if not preclaimed and bool(db.run(is_channel_processed(channel_url))):
 		db.run(release_channel_discovery_claim(channel_url, claim_owner))
 		print(f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][skip] already processed: {channel_url}\033[0m")
 		return (channel_url, "skipped", "pending", None)
@@ -863,7 +882,7 @@ def run(
 	claim_stale_minutes: int = DEFAULT_CLAIM_STALE_MINUTES,
 	ensure_schema: bool = True,
 	finalize: bool = True,
-	ytdlp_mode: str = "subprocess",
+	ytdlp_mode: str = "process-pool",
 ) -> None:
 	"""Main orchestration: fetch candidates -> process in parallel workers.
 
@@ -978,6 +997,7 @@ def run(
 							ytdlp_executor=ytdlp_executor,
 							max_videos=max_videos,
 							timeout_seconds=timeout_seconds,
+							preclaimed=True,
 						): channel_url
 						for channel_url in claimed
 				}
@@ -1078,7 +1098,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	p.add_argument(
 		"--ytdlp-mode",
 		choices=("subprocess", "process-pool"),
-		default="subprocess",
+		default="process-pool",
 	)
 	p.add_argument(
 		"--dsn",

@@ -139,7 +139,14 @@ def main():
             # Ejecutamos yt_discovery.py como subproceso
             # Se asume que usa las opciones por defecto (headless=True, limit=None o lo que tenga el script)
             # Puedes agregar --limit 50 si quisieras forzar un límite
-            cmd = [sys.executable, "yt_discovery.py", "--query", query, "--headless"]
+            cmd = [
+                sys.executable,
+                "yt_discovery.py",
+                "--query",
+                query,
+                "--headless",
+                "--skip-schema",
+            ]
             
             # Add language flag
             if args.lang == "en-US":

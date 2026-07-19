@@ -35,8 +35,10 @@ Busca videos en YouTube y guarda los resultados crudos en la tabla `videos_raw`.
 
 ```bash
 python yt_discovery.py --query "documental" --headless
-# opcional: limitar cantidad de resultados
+# opcional: limitar resultados y detener el scroll al alcanzar el límite
 python yt_discovery.py --query "documental" --limit 50 --headless
+# opcional: guardar capturas y HTML de diagnóstico
+python yt_discovery.py --query "documental" --debug-artifacts --headless
 ```
 
 ### 2) Normalización/Validación
@@ -56,6 +58,8 @@ El script usa el source local vendorizado en `yt-dlp/yt-dlp`.
 python yt_channel_discovery.py
 # opcional: limitar canales y videos
 python yt_channel_discovery.py --limit-channels 50 --max-videos 25
+# rollback: ejecutar un subprocess de yt-dlp por canal
+python yt_channel_discovery.py --ytdlp-mode subprocess
 ```
 
 ## Buenas prácticas

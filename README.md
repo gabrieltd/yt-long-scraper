@@ -75,6 +75,16 @@ Con idioma y filtros (Español):
 python yt_discovery.py --query "documental" --ES --upload-date this_month --duration over_20 --headless
 ```
 
+Para acotar tanto la salida como el trabajo de red, usa `--limit`. Los artefactos
+HTML y las capturas de diagnóstico son opcionales:
+```bash
+python yt_discovery.py --query "documental" --limit 50 --headless
+python yt_discovery.py --query "documental" --debug-artifacts --headless
+```
+
+`--skip-schema` es una opción interna para runners que ya inicializaron la base.
+Las ejecuciones directas no deben usarla salvo que el esquema esté preparado.
+
 **Parallel Discovery (múltiples queries):**
 ```bash
 # Español (usa queries.txt por defecto)
@@ -109,8 +119,8 @@ python yt_channel_discovery.py
 # concurrencia configurable; el lote de claims predeterminado es 2 x workers
 python yt_channel_discovery.py --max-workers 6 --claim-stale-minutes 60
 
-# modo experimental; subprocess sigue siendo el valor predeterminado
-python yt_channel_discovery.py --ytdlp-mode process-pool
+# process-pool persistente es el predeterminado; rollback disponible
+python yt_channel_discovery.py --ytdlp-mode subprocess
 
 # reintenta sólo canales cuya fecha del primer video quedó pendiente
 python yt_first_video_enrichment.py --workers 5 --batch-size 50

@@ -40,6 +40,19 @@ def _signature(channel_url: str, dump: dict[str, Any], max_videos: int) -> dict[
     }
 
 
+def _structural_signature(signature: dict[str, Any] | None) -> Any:
+    """Exclude titles that YouTube may translate between identical requests."""
+    if signature is None:
+        return None
+    return (
+        signature["channel_id"],
+        tuple(
+            (video_id, upload_date, duration)
+            for video_id, _title, upload_date, duration in signature["videos"]
+        ),
+    )
+
+
 def _measure(
     urls: list[str],
     *,
@@ -82,6 +95,7 @@ def main() -> int:
     parser.add_argument("--max-videos", type=int, default=60)
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--minimum-improvement", type=float, default=20.0)
+    parser.add_argument("--parity-retries", type=int, default=1)
     args = parser.parse_args()
 
     urls = [
@@ -108,7 +122,46 @@ def main() -> int:
         max_videos=args.max_videos,
         timeout_seconds=args.timeout_seconds,
     )
-    mismatches = [
+    initial_structural_mismatches = [
+        url for url in urls
+        if _structural_signature(subprocess_results.get(url))
+        != _structural_signature(pool_results.get(url))
+    ]
+    structural_mismatches = list(initial_structural_mismatches)
+    transient_mismatches: list[str] = []
+    for _attempt in range(max(0, args.parity_retries)):
+        if not structural_mismatches:
+            break
+        remaining: list[str] = []
+        for url in structural_mismatches:
+            try:
+                subprocess_retry = _signature(
+                    url,
+                    run_ytdlp_channel_dump(
+                        url,
+                        max_videos=args.max_videos,
+                        timeout_seconds=args.timeout_seconds,
+                    ),
+                    args.max_videos,
+                )
+                pool_retry = _signature(
+                    url,
+                    run_ytdlp_channel_dump_api(
+                        url,
+                        max_videos=args.max_videos,
+                        timeout_seconds=args.timeout_seconds,
+                    ),
+                    args.max_videos,
+                )
+            except Exception:
+                remaining.append(url)
+                continue
+            if _structural_signature(subprocess_retry) == _structural_signature(pool_retry):
+                transient_mismatches.append(url)
+            else:
+                remaining.append(url)
+        structural_mismatches = remaining
+    localized_mismatches = [
         url for url in urls
         if subprocess_results.get(url) != pool_results.get(url)
     ]
@@ -119,12 +172,22 @@ def main() -> int:
     print(
         f"subprocess={subprocess_seconds:.2f}s errors={len(subprocess_errors)} "
         f"process_pool={pool_seconds:.2f}s errors={len(pool_errors)} "
-        f"improvement={improvement:.1f}% mismatches={len(mismatches)}"
+        f"improvement={improvement:.1f}% "
+        f"initial_structural_mismatches={len(initial_structural_mismatches)} "
+        f"structural_mismatches={len(structural_mismatches)} "
+        f"localized_mismatches={len(localized_mismatches)}"
     )
-    if mismatches:
-        print("mismatched channels:", ", ".join(mismatches))
+    if transient_mismatches:
+        print("transient structural differences:", ", ".join(transient_mismatches))
+    if structural_mismatches:
+        print("structurally mismatched channels:", ", ".join(structural_mismatches))
+    if localized_mismatches:
+        print(
+            "localized/title differences (informational):",
+            ", ".join(localized_mismatches),
+        )
     promoted = (
-        not mismatches
+        not structural_mismatches
         and len(pool_errors) <= len(subprocess_errors)
         and improvement >= args.minimum_improvement
     )

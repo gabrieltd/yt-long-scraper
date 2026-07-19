@@ -43,7 +43,14 @@ async def worker(
         try:
             # Construct command
             # Using sys.executable to ensure we use the same Python environment
-            cmd = [sys.executable, "yt_discovery.py", "--query", query, "--headless"]
+            cmd = [
+                sys.executable,
+                "yt_discovery.py",
+                "--query",
+                query,
+                "--headless",
+                "--skip-schema",
+            ]
             
             # Add language flag
             if lang == "en-US":

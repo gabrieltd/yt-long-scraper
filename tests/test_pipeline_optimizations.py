@@ -11,6 +11,7 @@ from unittest import mock
 import db
 import yt_channel_discovery as discovery
 import yt_first_video_enrichment as enrichment
+from scripts import benchmark_channel_ytdlp_modes as channel_benchmark
 
 
 CHANNEL_ID = "UCaaaaaaaaaaaaaaaaaaaaaa"
@@ -104,6 +105,31 @@ class DatabaseOptimizationTests(unittest.TestCase):
 
 
 class DiscoveryOptimizationTests(unittest.TestCase):
+
+    def test_benchmark_ignores_localized_titles_but_not_structural_fields(self) -> None:
+        base = {
+            "channel_id": CHANNEL_ID,
+            "channel_name": "Original",
+            "videos": [("abcdefghijk", "Original title", "20240101", 120)],
+        }
+        translated = {
+            "channel_id": CHANNEL_ID,
+            "channel_name": "Translated",
+            "videos": [("abcdefghijk", "Translated title", "20240101", 120)],
+        }
+        changed_id = {
+            **translated,
+            "videos": [("zyxwvutsrqp", "Translated title", "20240101", 120)],
+        }
+
+        self.assertEqual(
+            channel_benchmark._structural_signature(base),
+            channel_benchmark._structural_signature(translated),
+        )
+        self.assertNotEqual(
+            channel_benchmark._structural_signature(base),
+            channel_benchmark._structural_signature(changed_id),
+        )
     def _dump(self) -> dict:
         return {
             "channel_id": CHANNEL_ID,
@@ -183,11 +209,16 @@ class DiscoveryOptimizationTests(unittest.TestCase):
             def sanitize_info(self, info):
                 return info
 
-        fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+        fake_module = types.SimpleNamespace(
+            YoutubeDL=FakeYoutubeDL,
+            parse_options=lambda _args: types.SimpleNamespace(ydl_opts={"quiet": True}),
+        )
+        discovery._ytdlp_api_options.cache_clear()
         with mock.patch.dict(sys.modules, {"yt_dlp": fake_module}):
             result = discovery.run_ytdlp_channel_dump_api(
                 "https://www.youtube.com/@channel", max_videos=60
             )
+        discovery._ytdlp_api_options.cache_clear()
         self.assertEqual(result, payload)
 
     def test_last_upload_keeps_approximate_date_outside_rss_window(self) -> None:
@@ -213,6 +244,39 @@ class DiscoveryOptimizationTests(unittest.TestCase):
             )
         channel = persist_mock.call_args.args[0]
         self.assertEqual(channel["last_upload_date"], "20240102")
+
+    def test_preclaimed_channel_skips_redundant_processed_lookup(self) -> None:
+        runner = mock.Mock()
+        pending = {"first_video_status": "pending", "first_video_last_error": "later"}
+        with (
+            mock.patch.object(discovery, "is_channel_processed") as processed_mock,
+            mock.patch.object(discovery, "run_ytdlp_channel_dump", return_value=self._dump()),
+            mock.patch.object(discovery, "fetch_rss_dates", return_value=({}, None)),
+            mock.patch.object(discovery, "resolve_first_video", return_value=pending),
+            mock.patch.object(
+                discovery,
+                "persist_channel_discovery_result",
+                new=mock.Mock(return_value="persist"),
+            ),
+            mock.patch("builtins.print"),
+        ):
+            result = discovery.process_one_channel(
+                "https://www.youtube.com/@channel",
+                runner,
+                claim_owner="owner",
+                preclaimed=True,
+            )
+
+        self.assertEqual(result[1], "processed")
+        processed_mock.assert_not_called()
+
+    def test_process_pool_is_the_default_with_subprocess_rollback(self) -> None:
+        parser = discovery._build_arg_parser()
+        self.assertEqual(parser.parse_args([]).ytdlp_mode, "process-pool")
+        self.assertEqual(
+            parser.parse_args(["--ytdlp-mode", "subprocess"]).ytdlp_mode,
+            "subprocess",
+        )
 
     def test_stop_terminates_registered_subprocesses(self) -> None:
         process = mock.Mock()
