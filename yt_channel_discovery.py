@@ -328,8 +328,9 @@ def resolve_first_video(
 	client: YouTubeOldestVideoClient,
 	*,
 	fallback_timeout_seconds: int = 180,
+	allow_ytdlp_fallback: bool = True,
 ) -> dict[str, Any]:
-	"""Resolve first-video metadata, using yt-dlp only after an individual failure."""
+	"""Resolve first-video metadata, optionally falling back after an individual failure."""
 	attempted_at = _utcnow()
 	try:
 		metadata = client.fetch_first_video(channel_id)
@@ -341,6 +342,12 @@ def resolve_first_video(
 			"first_video_last_error": str(exc),
 		}
 	except OldestVideoError as primary_error:
+		if not allow_ytdlp_fallback:
+			return {
+				"first_video_status": "pending",
+				"first_video_last_attempt_at": attempted_at,
+				"first_video_last_error": f"Innertube: {primary_error}",
+			}
 		try:
 			metadata = fetch_first_video_with_ytdlp(
 				channel_url,

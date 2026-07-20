@@ -20,6 +20,11 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def _setup_db_connection(connection: asyncpg.Connection) -> None:
+    """Ensure pooled Supabase sessions can execute the pipeline's writes."""
+    await connection.execute("SET default_transaction_read_only = off")
+
+
 async def init_db(
     dsn: str | None = None,
     min_size: int = 1,
@@ -66,6 +71,9 @@ async def init_db(
         min_size=min_size, 
         max_size=max_size, 
         statement_cache_size=0,
+        # Supabase can apply a read-only role default after startup parameters.
+        # Run the override whenever asyncpg acquires a pooled connection.
+        setup=_setup_db_connection,
         timeout=120,  # Increase timeout to 120 seconds for slow connections
         command_timeout=60  # Set command timeout
     )

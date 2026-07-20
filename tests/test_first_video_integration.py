@@ -16,6 +16,23 @@ VIDEO_ID = "abcdefghijk"
 
 
 class ResolveFirstVideoTests(unittest.TestCase):
+    def test_fallback_can_be_disabled_for_independent_enrichment(self) -> None:
+        client = mock.Mock()
+        client.fetch_first_video.side_effect = OldestVideoError(
+            "player blocked", video_id=VIDEO_ID
+        )
+        with mock.patch.object(discovery, "fetch_first_video_with_ytdlp") as fallback_mock:
+            result = discovery.resolve_first_video(
+                "https://www.youtube.com/@channel",
+                CHANNEL_ID,
+                client,
+                allow_ytdlp_fallback=False,
+            )
+
+        fallback_mock.assert_not_called()
+        self.assertEqual(result["first_video_status"], "pending")
+        self.assertEqual(result["first_video_last_error"], "Innertube: player blocked")
+
     def test_individual_failure_uses_known_id_fallback(self) -> None:
         client = mock.Mock()
         client.fetch_first_video.side_effect = OldestVideoError(

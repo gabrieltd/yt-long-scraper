@@ -31,6 +31,17 @@ class DatabaseOptimizationTests(unittest.TestCase):
         ):
             asyncio.run(db.init_db("postgresql://test", ensure_schema=False))
         create_mock.assert_not_awaited()
+        self.assertIs(
+            db.asyncpg.create_pool.await_args.kwargs["setup"],
+            db._setup_db_connection,
+        )
+
+    def test_connection_setup_overrides_read_only_role_default(self) -> None:
+        connection = mock.AsyncMock()
+        asyncio.run(db._setup_db_connection(connection))
+        connection.execute.assert_awaited_once_with(
+            "SET default_transaction_read_only = off"
+        )
 
     def test_discovery_claim_returns_only_atomic_insert_results(self) -> None:
         pool = mock.Mock()
@@ -380,7 +391,7 @@ class EnrichmentBatchTests(unittest.TestCase):
             mock.patch.object(enrichment.YouTubeOldestVideoClient, "initialize", return_value=mock.Mock()),
             mock.patch.object(
                 enrichment, "resolve_first_video", side_effect=lambda *_args, **_kwargs: result.copy()
-            ),
+            ) as resolve_mock,
             mock.patch("builtins.print"),
         ):
             enrichment.run(workers=2, limit=20, batch_size=50)
@@ -388,6 +399,7 @@ class EnrichmentBatchTests(unittest.TestCase):
         self.assertIsInstance(
             claim_mock.call_args_list[0].kwargs["eligible_before"], datetime
         )
+        self.assertFalse(resolve_mock.call_args.kwargs["allow_ytdlp_fallback"])
 
 
 class WorkflowTests(unittest.TestCase):

@@ -29,7 +29,6 @@ def run(
     limit: int = 1_000_000,
     batch_size: int = 50,
     timeout_seconds: int = 20,
-    fallback_timeout_seconds: int = 180,
     stale_after_minutes: int = 60,
     dsn: str | None = None,
     ensure_schema: bool = True,
@@ -62,7 +61,6 @@ def run(
             "no_public_videos": 0,
             "pending": 0,
             "innertube": 0,
-            "yt_dlp": 0,
         }
         claimed_total = 0
         remaining = limit
@@ -95,7 +93,7 @@ def run(
                             profile["channel_url"],
                             profile["channel_id"],
                             client,
-                            fallback_timeout_seconds=fallback_timeout_seconds,
+                            allow_ytdlp_fallback=False,
                         ): profile
                         for profile in window
                     }
@@ -155,7 +153,7 @@ def run(
             "[first-video][done] "
             f"total={claimed_total} success={totals['success']} "
             f"empty={totals['no_public_videos']} failed={totals['pending']} "
-            f"innertube={totals['innertube']} yt-dlp={totals['yt_dlp']} "
+            f"innertube={totals['innertube']} "
             f"seconds={duration:.2f}"
         )
     finally:
@@ -171,7 +169,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=1_000_000)
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--timeout-seconds", type=int, default=20)
-    parser.add_argument("--fallback-timeout-seconds", type=int, default=180)
     parser.add_argument("--stale-after-minutes", type=int, default=60)
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--skip-schema", action="store_false", dest="ensure_schema")
@@ -192,7 +189,6 @@ if __name__ == "__main__":
             limit=args.limit,
             batch_size=args.batch_size,
             timeout_seconds=args.timeout_seconds,
-            fallback_timeout_seconds=args.fallback_timeout_seconds,
             stale_after_minutes=args.stale_after_minutes,
             dsn=args.dsn,
             ensure_schema=args.ensure_schema,
