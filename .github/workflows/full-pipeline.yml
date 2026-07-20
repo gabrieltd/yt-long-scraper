@@ -413,7 +413,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           echo "Starting Job ${{ matrix.job_index }} — processing ${{ needs.prepare-channel-matrix.outputs.channels_per_job }} channels"
-          CMD="python yt_channel_discovery.py --limit-channels ${{ needs.prepare-channel-matrix.outputs.channels_per_job }} --skip-schema --skip-finalize"
+          CMD="python yt_channel_discovery.py --limit-channels ${{ needs.prepare-channel-matrix.outputs.channels_per_job }} --claim-batch-size 120 --skip-schema --skip-finalize"
 
           if [ "${{ inputs.language }}" = "EN" ]; then
             CMD="$CMD --EN"

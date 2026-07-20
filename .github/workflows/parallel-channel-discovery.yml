@@ -135,7 +135,7 @@ jobs:
           echo "Starting Job  ${{ matrix.job_index }} processing ${{ inputs.channels_per_job }} channels"
           # The script uses DB claiming, so multiple jobs will automatically pick different channels.
           # We pass limit-channels to control batch size per job.
-          CMD="python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }} --skip-schema --skip-finalize"
+          CMD="python yt_channel_discovery.py --limit-channels ${{ inputs.channels_per_job }} --claim-batch-size 120 --skip-schema --skip-finalize"
           
           # Add language flag
           if [ "${{ inputs.language }}" = "EN" ]; then

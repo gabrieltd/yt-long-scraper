@@ -10,6 +10,7 @@ from unittest import mock
 
 import db
 import yt_channel_discovery as discovery
+import yt_channel_finalize as channel_finalize
 import yt_first_video_enrichment as enrichment
 from scripts import benchmark_channel_ytdlp_modes as channel_benchmark
 
@@ -32,17 +33,37 @@ class DatabaseOptimizationTests(unittest.TestCase):
         create_mock.assert_not_awaited()
 
     def test_discovery_claim_returns_only_atomic_insert_results(self) -> None:
-        pool = mock.AsyncMock()
-        pool.fetch.return_value = [{"channel_url": "channel-a"}]
+        pool = mock.Mock()
+        connection = mock.AsyncMock()
+        connection.fetch.return_value = [{"channel_url": "channel-a"}]
+        acquire_context = mock.MagicMock()
+        acquire_context.__aenter__ = mock.AsyncMock(return_value=connection)
+        acquire_context.__aexit__ = mock.AsyncMock(return_value=False)
+        transaction_context = mock.MagicMock()
+        transaction_context.__aenter__ = mock.AsyncMock(return_value=None)
+        transaction_context.__aexit__ = mock.AsyncMock(return_value=False)
+        pool.acquire.return_value = acquire_context
+        connection.transaction = mock.Mock(return_value=transaction_context)
         db._DB_POOL = pool
         result = asyncio.run(db.claim_channels_for_discovery(
             5, claim_owner="owner-a", stale_after_minutes=60
         ))
-        sql = pool.fetch.await_args.args[0]
+        lock_sql = connection.execute.await_args.args[0]
+        sql = connection.fetch.await_args.args[0]
+        self.assertIn("pg_advisory_xact_lock", lock_sql)
         self.assertIn("ON CONFLICT (channel_url) DO UPDATE", sql)
         self.assertIn("RETURNING channel_url", sql)
-        self.assertEqual(pool.fetch.await_args.args[2], "owner-a")
+        self.assertEqual(connection.fetch.await_args.args[2], "owner-a")
         self.assertEqual(result, ["channel-a"])
+
+    def test_pending_channel_count_ignores_claims(self) -> None:
+        pool = mock.AsyncMock()
+        pool.fetchval.return_value = 7
+        db._DB_POOL = pool
+        result = asyncio.run(db.count_pending_channels_for_discovery())
+        sql = pool.fetchval.await_args.args[0]
+        self.assertNotIn("channels_discovery_claims", sql)
+        self.assertEqual(result, 7)
 
     def test_release_claims_is_scoped_to_owner(self) -> None:
         pool = mock.AsyncMock()
@@ -105,6 +126,28 @@ class DatabaseOptimizationTests(unittest.TestCase):
 
 
 class DiscoveryOptimizationTests(unittest.TestCase):
+
+    def test_claim_batch_retries_a_transient_empty_result(self) -> None:
+        runner = mock.Mock()
+        results = [[], ["channel-a"]]
+
+        def run_claim(coroutine):
+            coroutine.close()
+            return results.pop(0)
+
+        runner.run.side_effect = run_claim
+        discovery._STOP_EVENT.clear()
+        with mock.patch.object(discovery._STOP_EVENT, "wait", return_value=False) as wait_mock:
+            claimed = discovery._claim_channel_batch(
+                runner,
+                limit=12,
+                claim_owner="owner-a",
+                stale_after_minutes=60,
+            )
+
+        self.assertEqual(claimed, ["channel-a"])
+        self.assertEqual(runner.run.call_count, 2)
+        wait_mock.assert_called_once_with(discovery.EMPTY_CLAIM_RETRY_SECONDS)
 
     def test_benchmark_ignores_localized_titles_but_not_structural_fields(self) -> None:
         base = {
@@ -348,11 +391,54 @@ class EnrichmentBatchTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+
+    def test_finalizer_preserves_staging_while_channels_are_pending(self) -> None:
+        with (
+            mock.patch.object(channel_finalize, "init_db", new=mock.AsyncMock()),
+            mock.patch.object(channel_finalize, "close_db", new=mock.AsyncMock()),
+            mock.patch.object(
+                channel_finalize, "refresh_channel_stats", new=mock.AsyncMock(return_value=True)
+            ),
+            mock.patch.object(
+                channel_finalize,
+                "count_pending_channels_for_discovery",
+                new=mock.AsyncMock(return_value=21_311),
+            ),
+            mock.patch.object(
+                channel_finalize, "purge_pipeline_staging_tables", new=mock.AsyncMock()
+            ) as purge_mock,
+        ):
+            asyncio.run(channel_finalize.finalize(ensure_schema=False))
+
+        purge_mock.assert_not_awaited()
+
+    def test_finalizer_purges_staging_after_queue_is_drained(self) -> None:
+        with (
+            mock.patch.object(channel_finalize, "init_db", new=mock.AsyncMock()),
+            mock.patch.object(channel_finalize, "close_db", new=mock.AsyncMock()),
+            mock.patch.object(
+                channel_finalize, "refresh_channel_stats", new=mock.AsyncMock(return_value=True)
+            ),
+            mock.patch.object(
+                channel_finalize,
+                "count_pending_channels_for_discovery",
+                new=mock.AsyncMock(return_value=0),
+            ),
+            mock.patch.object(
+                channel_finalize,
+                "purge_pipeline_staging_tables",
+                new=mock.AsyncMock(return_value=["videos_raw_es"]),
+            ) as purge_mock,
+        ):
+            asyncio.run(channel_finalize.finalize(ensure_schema=False))
+
+        purge_mock.assert_awaited_once_with("es")
     def test_parallel_workers_skip_schema_and_finalize_once(self) -> None:
         root = Path(__file__).resolve().parents[1]
         for filename in ("full-pipeline.yml", "parallel-channel-discovery.yml"):
             text = (root / ".github" / "workflows" / filename).read_text(encoding="utf-8")
             self.assertIn("--skip-schema --skip-finalize", text)
+            self.assertIn("--claim-batch-size 120", text)
             self.assertIn("yt_channel_finalize.py --skip-schema", text)
             self.assertEqual(text.count("yt_channel_finalize.py --skip-schema"), 1)
             self.assertIn("group: youtube-long-channel-pipeline-${{ inputs.language }}", text)

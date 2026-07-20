@@ -665,41 +665,72 @@ async def claim_channels_for_discovery(
     videos_normalized_table = _get_table_name("videos_normalized")
     channels_processed_table = _get_table_name("channels_processed")
     channels_claims_table = _get_table_name("channels_discovery_claims")
-    rows = await _require_pool().fetch(f"""
-        WITH candidates AS (
-            SELECT n.channel_url, MIN(n.normalized_at) AS first_seen
-            FROM {videos_normalized_table} n
-            WHERE n.validation_passed = TRUE
-              AND n.channel_url IS NOT NULL
-              AND n.channel_url <> ''
-              AND NOT EXISTS (
-                  SELECT 1 FROM {channels_processed_table} p
-                  WHERE p.channel_url = n.channel_url
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM {channels_claims_table} c
-                  WHERE c.channel_url = n.channel_url
-                    AND c.claimed_at >= CURRENT_TIMESTAMP
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Candidate selection must also be serialized. Without this short
+            # transaction-level lock, parallel GitHub jobs can select the same
+            # batch; only one inserts it and the others receive an empty result,
+            # incorrectly concluding that the shared queue is exhausted.
+            # Transaction-level advisory locks are safe with transaction poolers
+            # because PostgreSQL releases the lock on commit.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"youtube-long-channel-claims:{_DB_LANGUAGE}",
+            )
+            rows = await conn.fetch(f"""
+                WITH candidates AS (
+                    SELECT n.channel_url, MIN(n.normalized_at) AS first_seen
+                    FROM {videos_normalized_table} n
+                    WHERE n.validation_passed = TRUE
+                      AND n.channel_url IS NOT NULL
+                      AND n.channel_url <> ''
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {channels_processed_table} p
+                          WHERE p.channel_url = n.channel_url
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {channels_claims_table} c
+                          WHERE c.channel_url = n.channel_url
+                            AND c.claimed_at >= CURRENT_TIMESTAMP
+                                - ($3::INTEGER * INTERVAL '1 minute')
+                      )
+                    GROUP BY n.channel_url
+                    ORDER BY first_seen ASC
+                    LIMIT $1
+                ),
+                claimed AS (
+                    INSERT INTO {channels_claims_table} (channel_url, claimed_at, claim_owner)
+                    SELECT channel_url, CURRENT_TIMESTAMP, $2
+                    FROM candidates
+                    ON CONFLICT (channel_url) DO UPDATE
+                    SET claimed_at = EXCLUDED.claimed_at,
+                        claim_owner = EXCLUDED.claim_owner
+                    WHERE {channels_claims_table}.claimed_at < CURRENT_TIMESTAMP
                         - ($3::INTEGER * INTERVAL '1 minute')
-              )
-            GROUP BY n.channel_url
-            ORDER BY first_seen ASC
-            LIMIT $1
-        ),
-        claimed AS (
-            INSERT INTO {channels_claims_table} (channel_url, claimed_at, claim_owner)
-            SELECT channel_url, CURRENT_TIMESTAMP, $2
-            FROM candidates
-            ON CONFLICT (channel_url) DO UPDATE
-            SET claimed_at = EXCLUDED.claimed_at,
-                claim_owner = EXCLUDED.claim_owner
-            WHERE {channels_claims_table}.claimed_at < CURRENT_TIMESTAMP
-                - ($3::INTEGER * INTERVAL '1 minute')
-            RETURNING channel_url
-        )
-        SELECT channel_url FROM claimed
-    """, limit, owner, stale_after_minutes)
+                    RETURNING channel_url
+                )
+                SELECT channel_url FROM claimed
+            """, limit, owner, stale_after_minutes)
     return [row["channel_url"] for row in rows]
+
+
+async def count_pending_channels_for_discovery() -> int:
+    """Count valid candidate channels that have not reached a terminal status."""
+    videos_normalized_table = _get_table_name("videos_normalized")
+    channels_processed_table = _get_table_name("channels_processed")
+    value = await _require_pool().fetchval(f"""
+        SELECT COUNT(DISTINCT n.channel_url)
+        FROM {videos_normalized_table} n
+        WHERE n.validation_passed = TRUE
+          AND n.channel_url IS NOT NULL
+          AND n.channel_url <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM {channels_processed_table} p
+              WHERE p.channel_url = n.channel_url
+          )
+    """)
+    return int(value or 0)
 
 
 async def release_channel_discovery_claims(claim_owner: str) -> int:

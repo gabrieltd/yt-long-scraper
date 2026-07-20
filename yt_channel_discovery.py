@@ -50,6 +50,7 @@ from youtube_oldest_video import (
 from db import (
 	claim_channels_for_discovery,
 	close_db,
+	count_pending_channels_for_discovery,
 	init_db,
 	is_channel_processed,
 	mark_channel_processed,
@@ -72,6 +73,8 @@ MAX_WORKERS = 6
 
 # Number of channels to claim per DB round-trip.
 DEFAULT_CLAIM_STALE_MINUTES = 60
+EMPTY_CLAIM_RETRIES = 3
+EMPTY_CLAIM_RETRY_SECONDS = 0.25
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -80,6 +83,32 @@ LOCAL_YTDLP_MAIN = LOCAL_YTDLP_ROOT / "yt_dlp" / "__main__.py"
 _STOP_EVENT = threading.Event()
 _ACTIVE_YTDLP_LOCK = threading.Lock()
 _ACTIVE_YTDLP_PROCESSES: set[subprocess.Popen[str]] = set()
+
+
+def _claim_channel_batch(
+	db: "_DBRunner",
+	*,
+	limit: int,
+	claim_owner: str,
+	stale_after_minutes: int,
+	retries: int = EMPTY_CLAIM_RETRIES,
+) -> list[str]:
+	"""Acquire a batch, tolerating a transient empty result under contention."""
+	for attempt in range(retries + 1):
+		claimed = db.run(claim_channels_for_discovery(
+			limit=limit,
+			claim_owner=claim_owner,
+			stale_after_minutes=stale_after_minutes,
+		))
+		if claimed or _STOP_EVENT.is_set() or attempt >= retries:
+			return claimed
+		delay = EMPTY_CLAIM_RETRY_SECONDS * (attempt + 1)
+		print(
+			f"\033[93m[info] empty claim; retrying shared queue "
+			f"({attempt + 1}/{retries}) in {delay:.2f}s\033[0m"
+		)
+		_STOP_EVENT.wait(delay)
+	return []
 
 
 @functools.lru_cache(maxsize=16)
@@ -967,11 +996,12 @@ def run(
 			if remaining is not None:
 				batch_limit = min(batch_limit, remaining)
 
-			claimed = db.run(claim_channels_for_discovery(
+			claimed = _claim_channel_batch(
+				db,
 				limit=batch_limit,
 				claim_owner=claim_owner,
 				stale_after_minutes=claim_stale_minutes,
-			))
+			)
 			if not claimed:
 				break
 
@@ -1037,9 +1067,16 @@ def run(
 			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][stats] {status}\033[0m")
 
 		if finalize:
-			print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] truncating pipeline staging tables for language={language}...\033[0m")
-			purged_tables = db.run(purge_pipeline_staging_tables(language))
-			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
+			pending = int(db.run(count_pending_channels_for_discovery()))
+			if pending:
+				print(
+					f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][purge-skip] "
+					f"preserving staging: {pending} channels remain pending\033[0m"
+				)
+			else:
+				print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] truncating pipeline staging tables for language={language}...\033[0m")
+				purged_tables = db.run(purge_pipeline_staging_tables(language))
+				print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
 		print(
