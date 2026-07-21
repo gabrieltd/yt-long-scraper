@@ -1,112 +1,97 @@
 # Base de datos (PostgreSQL)
 
-El proyecto utiliza **PostgreSQL** como motor de base de datos.
-Se requiere una instancia de PostgreSQL en ejecución y configurar la variable de entorno `DATABASE_URL` en el archivo `.env`.
+El proyecto usa PostgreSQL mediante `asyncpg`. La conexión se configura con
+`DATABASE_URL` y [db.py](../db.py) administra el pool, el esquema y las
+operaciones transaccionales.
 
-## Conexión
+Cada entidad tiene tablas independientes por idioma, con sufijo `_es` o `_en`.
+El esquema actual está diseñado para una base nueva; su creación es idempotente,
+pero no convierte estructuras históricas.
 
-Se utiliza la librería `asyncpg` para accesos asíncronos de alto rendimiento.
-La conexión utiliza un *connection pool* gestionado globalmente.
+## Discovery y staging
 
-El script [db.py](../db.py) maneja toda la lógica de conexión y esquema.
+### `search_runs_{lang}`
 
-## Tablas
+Historial durable de búsquedas. `id` es un UUID nativo y cada ejecución conserva
+`query`, `mode`, timestamps, `status`, `result_count` y `last_error`.
 
-### `search_runs`
+Sólo una fila con `status = 'success'` hace que una query cuente como ejecutada.
+Una ejecución fallida permanece en el historial y puede volver a intentarse;
+`--reprocess-duplicates` ignora el historial de éxitos.
 
-Registro de ejecuciones de búsqueda (discovery).
+### `discovery_videos_staging_{lang}`
 
-Campos:
-- `id` (TEXT/UUID, PK)
-- `query` (TEXT)
-- `mode` (TEXT)
-- `started_at` (TIMESTAMPTZ)
-- `finished_at` (TIMESTAMPTZ)
+Única tabla física para los resultados crudos y su normalización. Conserva el
+texto necesario de YouTube y, en la misma fila, los valores estimados, el
+resultado de validación y `normalized_at`.
 
-### `videos_raw`
+Las vistas `videos_raw_{lang}` y `videos_normalized_{lang}` mantienen los nombres
+y columnas de consulta anteriores. Las URLs de video y miniatura se derivan de
+`video_id`; no se almacenan en staging.
 
-Resultados “crudos” del scraping de búsqueda.
+### `channel_candidates_{lang}`
 
-Campos clave:
-- `video_id` (TEXT, PK)
-- `search_run_id` (TEXT, FK → `search_runs.id`)
-- `query` (TEXT)
-- `video_url` (TEXT)
-- `channel_url` (TEXT)
-- `duration_text` (TEXT)
-- `views_text` (TEXT)
-- `published_text` (TEXT)
-- `thumbnail_url` (TEXT)
-- `video_type` (TEXT)
-- `is_multi_creator` (BOOLEAN)
-- `discovered_at` (TIMESTAMPTZ)
+Cola durable con una sola fila por `channel_url` validado y su `first_seen`.
+Normalización la alimenta de forma idempotente y el descubrimiento de canales
+reclama trabajo desde esta tabla, no desde todas las filas de video.
 
-### `videos_normalized`
+Un resultado terminal elimina el candidato dentro de la misma transacción. Un
+fallo transitorio conserva la fila para el siguiente ciclo. La purga del staging
+pesado no borra esta cola.
 
-Normalización + validación de `videos_raw`.
+## Datos persistentes de canales
 
-Campos clave:
-- `video_id` (TEXT, PK, FK → `videos_raw.video_id`)
-- `channel_url` (TEXT)
-- `query` (TEXT)
-- `views_estimated` (BIGINT)
-- `published_at_estimated` (TIMESTAMPTZ)
-- `duration_seconds_estimated` (BIGINT)
-- `validation_passed` (BOOLEAN)
-- `validation_reason` (TEXT)
-- `normalized_at` (TIMESTAMPTZ)
+### `channels_raw_{lang}`
 
-### `channels_raw`
+Metadata del canal. Usa `id BIGINT GENERATED ALWAYS AS IDENTITY` como clave
+primaria interna y mantiene `channel_url` como valor público único. Incluye
+metadata de yt-dlp, `last_upload_date` y el estado del primer video.
 
-Metadata de canal obtenida por `yt-dlp`.
+### `channel_videos_raw_{lang}`
 
-Campos:
-- `channel_url` (TEXT, PK)
-- `channel_id` (TEXT)
-- `channel_name` (TEXT)
-- `subscriber_count` (BIGINT)
-- `is_verified` (BOOLEAN)
-- `first_video_id` (TEXT)
-- `first_video_published_at` (TIMESTAMPTZ)
-- `first_video_checked_at` (TIMESTAMPTZ)
-- `first_video_status` (TEXT: `pending`, `processing`, `success`, `no_public_videos`)
-- `first_video_source` (TEXT: `innertube` o `yt_dlp`)
-- `first_video_last_error` (TEXT)
-- `extracted_at` (TIMESTAMPTZ)
+Videos rastreados del canal:
 
-### `channel_videos_raw`
+- `video_id TEXT` como clave primaria global.
+- `channel_key BIGINT` como FK a `channels_raw.id`.
+- `upload_date DATE`, `duration_seconds INTEGER`, `view_count BIGINT` y `title`.
 
-Últimos N videos del canal (sin descargar).
+`video_url` y `thumbnail_url` no se almacenan: la API las reconstruye como la
+URL canónica de YouTube y `https://i.ytimg.com/vi/{video_id}/hqdefault.jpg`. La
+API también convierte `upload_date` al formato `YYYYMMDD` esperado por la UI.
 
-Campos:
-- `channel_url` (TEXT)
-- `video_id` (TEXT)
-- `upload_date` (TEXT)
-- `duration_seconds` (BIGINT)
-- `view_count` (BIGINT)
+### `channel_stats_{lang}`
 
-PK compuesta: `(channel_url, video_id)`
+Tabla compacta de estadísticas exactas por `channel_key`: total de videos,
+promedio, máximo y `view_counts BIGINT[]` ordenado para los filtros por rango.
 
-### `channels_processed`
+Se actualiza dentro de la misma transacción que persiste canal, videos, estado y
+liberación del claim. Por eso un canal queda visible inmediatamente y no depende
+de un refresh al finalizar. `refresh_channel_stats()` queda sólo como operación
+explícita de reconstrucción o reparación.
 
-Marca idempotente de canales ya procesados.
+### Tablas auxiliares
 
-Campos:
-- `channel_url` (TEXT, PK)
-- `processed_at` (TIMESTAMPTZ)
-- `status` (TEXT, default `success`)
+- `channels_processed_{lang}`: estado terminal e idempotencia por URL.
+- `channels_discovery_claims_{lang}`: claim, propietario y hora de adquisición;
+  los claims vencidos son recuperables y una interrupción libera sólo los del
+  propietario actual.
+- `channel_relevance_{lang}`: relevancia, notas y etiquetas por `channel_key`.
 
-### `channels_discovery_claims`
+## Finalización y almacenamiento
 
-Coordinación de workers.
+[yt_channel_finalize.py](../yt_channel_finalize.py) sólo trunca
+`discovery_videos_staging_{lang}`, limpia claims que ya tienen estado procesado y
+reporta cuántos candidatos durables quedan. No recalcula estadísticas ni borra
+`search_runs` o `channel_candidates`.
 
-Campos:
-- `channel_url` (TEXT, PK)
-- `claimed_at` (TIMESTAMPTZ)
-- `claim_owner` (TEXT; identifica la ejecución que puede liberar el claim)
+Antes del truncado, cualquier búsqueda exitosa que aún conserve filas sin
+normalizar pasa a `failed`. Así deja de contar como ejecutada y se vuelve a
+intentar en el ciclo siguiente, sin conservar el staging pesado.
 
-Los claims con más de 60 minutos se consideran recuperables por otra ejecución.
+Para inspeccionar filas, heap, índices, TOAST y tamaño total sin modificar la
+base:
 
-## Operación idempotente
-
-La mayoría de inserts usan `ON CONFLICT DO NOTHING` o `ON CONFLICT DO UPDATE` para permitir re-ejecuciones seguras.
+```bash
+python scripts/report_db_storage.py
+python scripts/report_db_storage.py --ES --exact-rows
+```

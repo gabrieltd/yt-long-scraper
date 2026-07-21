@@ -1,69 +1,103 @@
 # Configuración y ejecución
 
-Este proyecto utiliza **SQLite** para el almacenamiento de datos, lo que simplifica la configuración (no requiere servidor de base de datos externo).
+El proyecto usa PostgreSQL. Configure `DATABASE_URL` en `.env`; por ejemplo:
 
-## Instalación (Windows)
-
-1) Crear y activar entorno virtual:
-
-```bash
-python -m venv .venv
-# PowerShell
-.\.venv\Scripts\Activate.ps1
+```dotenv
+DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_discovery
 ```
 
-2) Instalar dependencias:
+## Instalación en Windows
 
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m pip install -e "./yt-dlp/yt-dlp[default]"
-```
-
-3) Instalar navegadores de Playwright:
-
-```bash
 python -m playwright install
 ```
 
-## Ejecución por etapas
+## Ejecución local
 
-El pipeline consta de 3 scripts principales que deben ejecutarse en orden:
+Las ejecuciones directas crean el esquema idempotente. Use `--EN` o `--ES` para
+seleccionar el conjunto de tablas; ES es el valor predeterminado.
 
-### 1) Discovery (Playwright)
-
-Busca videos en YouTube y guarda los resultados crudos en la tabla `videos_raw`.
-
-```bash
-python yt_discovery.py --query "documental" --headless
-# opcional: limitar resultados y detener el scroll al alcanzar el límite
-python yt_discovery.py --query "documental" --limit 50 --headless
-# opcional: guardar capturas y HTML de diagnóstico
-python yt_discovery.py --query "documental" --debug-artifacts --headless
-```
-
-### 2) Normalización/Validación
-
-Procesa los datos crudos, normaliza formatos (vistas, fechas, duración) y aplica validaciones. Guarda en `videos_normalized`.
+### 1. Discovery
 
 ```bash
-python yt_normalization_validation.py
+python yt_discovery.py --query "documental" --headless --ES
+python yt_discovery.py --query "documental" --limit 50 --headless --ES
+python yt_discovery.py --query "documental" --debug-artifacts --headless --ES
 ```
 
-### 3) Enriquecimiento de canales (yt-dlp)
-
-Lee los canales de videos validados y extrae información detallada usando yt-dlp. Guarda en `channels_raw` y `channel_videos_raw`.
-El script usa el source local vendorizado en `yt-dlp/yt-dlp`.
+Para ejecutar el archivo de queries y conservar el historial durable:
 
 ```bash
-python yt_channel_discovery.py
-# opcional: limitar canales y videos
-python yt_channel_discovery.py --limit-channels 50 --max-videos 25
-# rollback: ejecutar un subprocess de yt-dlp por canal
-python yt_channel_discovery.py --ytdlp-mode subprocess
+python run_discovery.py --ES
+python run_discovery.py --batch-size 50 --batch-index 0 --EN
+python run_discovery.py --ES --reprocess-duplicates
 ```
+
+Una query sólo se omite si tiene al menos un `search_run` exitoso.
+`--reprocess-duplicates` fuerza su ejecución aun cuando ya exista ese éxito.
+
+### 2. Normalización y validación
+
+```bash
+python yt_normalization_validation.py --ES
+```
+
+La etapa actualiza el staging físico unificado y genera
+`channel_candidates_{lang}`. Los nombres `videos_raw_{lang}` y
+`videos_normalized_{lang}` son vistas de compatibilidad, no tablas duplicadas.
+
+### 3. Descubrimiento de canales
+
+```bash
+python yt_channel_discovery.py --ES
+python yt_channel_discovery.py --max-workers 6 --claim-batch-size 12 --claim-stale-minutes 60 --ES
+python yt_channel_discovery.py --ytdlp-mode subprocess --ES
+```
+
+El modo predeterminado de yt-dlp es `process-pool`. El lote de claims por defecto
+es `2 x --max-workers`. La persistencia actualiza canal, videos y estadísticas
+atómicamente, por lo que no se necesita un refresh al terminar.
+
+La ejecución local purga automáticamente el staging pesado. Para conservarlo
+temporalmente puede usarse `--skip-finalize`.
+
+### Operaciones independientes
+
+```bash
+# Reintentar fechas pendientes del primer video
+python yt_first_video_enrichment.py --workers 5 --batch-size 50 --ES
+
+# Truncar staging pesado y reportar candidatos pendientes
+python yt_channel_finalize.py --ES
+
+# Reporte de almacenamiento de ES y EN (sólo lectura)
+python scripts/report_db_storage.py
+
+# Conteos exactos sólo para ES; puede ser más costoso
+python scripts/report_db_storage.py --ES --exact-rows
+```
+
+## GitHub Actions y runners preparados
+
+Los workflows crean el esquema una sola vez. Los jobs paralelos usan
+`--skip-schema` para evitar DDL concurrente y los workers de canal añaden
+`--skip-finalize`. Un único job final, ejecutado aunque falle un worker, llama a
+`yt_channel_finalize.py --skip-schema` para purgar staging; las estadísticas ya
+fueron actualizadas por cada transacción de canal.
+
+No use `--skip-schema` en una ejecución directa si las tablas del idioma todavía
+no existen.
 
 ## Buenas prácticas
 
-- Empieza con límites pequeños (p. ej. `--limit 50`) hasta validar estabilidad.
-- Si YouTube cambia el HTML o los selectores, Playwright puede fallar: ver [Troubleshooting](TROUBLESHOOTING.md).
+- Empiece con límites pequeños para validar conectividad y selectores.
+- Use `scripts/report_db_storage.py` antes de atribuir tamaño a una tabla: separa
+  heap, índices y TOAST.
+- No trunque `channel_candidates` para liberar staging; esa tabla es la cola
+  durable de reintentos.
+- Si YouTube cambia HTML o selectores, consulte [Troubleshooting](TROUBLESHOOTING.md).
 

@@ -9,9 +9,13 @@ from pathlib import Path
 import db
 from dotenv import load_dotenv
 
-async def get_already_run_queries(language: str = "es") -> set[str]:
+async def get_already_run_queries(
+    language: str = "es",
+    *,
+    ensure_schema: bool = True,
+) -> set[str]:
     try:
-        await db.init_db(language=language)
+        await db.init_db(language=language, ensure_schema=ensure_schema)
         executed = await db.get_executed_queries()
         await db.close_db()
         return executed
@@ -30,6 +34,12 @@ def main():
     parser.add_argument("--check-batches", action="store_true", help="Return JSON list of batch indices that have pending queries")
     parser.add_argument("--queries-file", type=str, default=None, help="File containing queries to process. If not specified, auto-selects based on language.")
     parser.add_argument("--reprocess-duplicates", action="store_true", help="Reprocess queries that have already been executed")
+    parser.add_argument(
+        "--skip-schema",
+        action="store_false",
+        dest="ensure_schema",
+        help="Use an already prepared database schema",
+    )
     
     # Language selection
     lang_group = parser.add_mutually_exclusive_group()
@@ -69,7 +79,10 @@ def main():
 
         # Convert locale to simple language code
         language = "en" if args.lang == "en-US" else "es"
-        already_run = asyncio.run(get_already_run_queries(language))
+        already_run = asyncio.run(get_already_run_queries(
+            language,
+            ensure_schema=args.ensure_schema,
+        ))
         batch_size = args.batch_size
         needed_batches = []
         
@@ -110,7 +123,10 @@ def main():
     print("🔎 Verificando historial de queries ejecutadas...")
     # Convert locale to simple language code
     language = "en" if args.lang == "en-US" else "es"
-    already_run = asyncio.run(get_already_run_queries(language))
+    already_run = asyncio.run(get_already_run_queries(
+        language,
+        ensure_schema=args.ensure_schema,
+    ))
     
     # 3. Filtrar
     if args.reprocess_duplicates:

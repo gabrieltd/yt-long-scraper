@@ -1,4 +1,4 @@
-"""Refresh channel statistics and purge staging only after discovery is complete."""
+"""Clean heavy discovery staging after channel workers finish."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from db import (
     count_pending_channels_for_discovery,
     init_db,
     purge_pipeline_staging_tables,
-    refresh_channel_stats,
 )
 
 
@@ -30,18 +29,17 @@ async def finalize(
         ensure_schema=ensure_schema,
     )
     try:
-        refreshed = await refresh_channel_stats(language)
-        refresh_status = "refreshed" if refreshed else "already refreshing elsewhere"
-        print(f"[channel-finalize][stats] {refresh_status}")
+        purged = await purge_pipeline_staging_tables(language)
+        print(f"[channel-finalize][purge] cleaned: {', '.join(purged)}")
+
         pending = await count_pending_channels_for_discovery()
         if pending:
             print(
-                "[channel-finalize][purge-skip] preserving staging: "
-                f"{pending} channels remain pending"
+                "[channel-finalize][candidates] "
+                f"{pending} channels remain pending for a later run"
             )
         else:
-            purged = await purge_pipeline_staging_tables(language)
-            print(f"[channel-finalize][purge] truncated: {', '.join(purged)}")
+            print("[channel-finalize][candidates] queue drained")
     finally:
         await close_db()
 

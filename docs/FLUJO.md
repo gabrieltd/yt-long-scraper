@@ -1,85 +1,72 @@
 # Flujo del pipeline
 
-Este documento describe el flujo actual del proyecto, simplificado para las etapas de descubrimiento y colección de datos.
+El pipeline conserva tres etapas de procesamiento y una finalización liviana.
+ES y EN usan el mismo flujo sobre tablas PostgreSQL separadas.
 
-## Resumen
+## 1. Discovery
 
-1. [yt_discovery.py](../yt_discovery.py)
-2. [yt_normalization_validation.py](../yt_normalization_validation.py)
-3. [yt_channel_discovery.py](../yt_channel_discovery.py)
+[yt_discovery.py](../yt_discovery.py) busca videos con Playwright, aplica los
+filtros solicitados y extrae ID, canal, duración, vistas y fecha publicada.
 
-## 1) Discovery: búsqueda en YouTube (Playwright)
+Cada intento crea una fila UUID en `search_runs_{lang}`. Los resultados se
+insertan en `discovery_videos_staging_{lang}` y el run termina como `success` o
+`failed`, con su cantidad y error. Sólo los runs exitosos evitan repetir una
+query en ejecuciones posteriores.
 
-Archivo: [yt_discovery.py](../yt_discovery.py)
+## 2. Normalización y candidatos
 
-- Abre `https://www.youtube.com/results?search_query=...`
-- Aplica filtros UI:
-  - "Este mes"
-  - "Más de 20 minutos"
-- Scrollea hasta “No hay más resultados”.
-- Extrae por cada resultado:
-  - `video_id`
-  - `channels`
-  - `duration`
-  - `views_text`
-  - `published_text`
-  - `video_type`
-  - `is_multi_creator`
-- Persiste en SQLite vía [db.py](../db.py):
-  - `create_search_run()`
-  - `insert_videos_raw()`
-  - `finish_search_run()`
+[yt_normalization_validation.py](../yt_normalization_validation.py) completa las
+columnas normalizadas de la misma fila física de staging:
 
-Salida: filas en tabla `videos_raw`.
+- vistas estimadas;
+- fecha estimada;
+- duración en segundos;
+- resultado y motivo de validación.
 
-## 2) Normalización y validación (video-level)
+Por compatibilidad, `videos_raw_{lang}` y `videos_normalized_{lang}` son vistas
+de esa tabla unificada. Cada canal que supera la validación se agrega una sola
+vez a `channel_candidates_{lang}`, salvo que ya tenga estado terminal.
 
-Archivo: [yt_normalization_validation.py](../yt_normalization_validation.py)
+## 3. Descubrimiento y enriquecimiento de canales
 
-- Lee videos sin normalizar: `db.fetch_unprocessed_videos_raw()`
-- Normaliza:
-  - `views_text` → `views_estimated`
-  - `published_text` → `published_at_estimated` (UTC estimado)
-  - `duration_text` → `duration_seconds_estimated`
-- Valida (reglas mínimas):
-  - duración `>= 1200s` (20 min)
-  - publicado dentro de últimos 60 días
-  - vistas `>= 1000`
-- Inserta en `videos_normalized` con:
-  - `validation_passed` y `validation_reason`
+[yt_channel_discovery.py](../yt_channel_discovery.py) reclama candidatos por
+lotes mediante una operación atómica. Cada claim tiene propietario y puede ser
+recuperado cuando vence.
 
-Salida: filas en tabla `videos_normalized`.
+El procesamiento por canal:
 
-## 3) Enriquecimiento de canal (yt-dlp)
+- extrae metadata y videos con el pool persistente de procesos de yt-dlp;
+- permite `--ytdlp-mode subprocess` como modo de rollback;
+- consulta RSS en paralelo con el primer video para corregir fechas recientes;
+- obtiene y registra el primer video público;
+- conserva fallos transitorios como pendientes para otro ciclo.
 
-Archivo: [yt_channel_discovery.py](../yt_channel_discovery.py)
+En un éxito, una sola transacción persiste `channels_raw`, hace el upsert masivo
+de `channel_videos_raw`, actualiza `channel_stats`, marca el canal procesado,
+libera su claim y elimina el candidato. Las claves internas entre estas tablas
+son `BIGINT`; `channel_url` continúa siendo la identidad pública.
 
-- Selecciona canales candidatos desde `videos_normalized`:
-  - `validation_passed = true`
-  - excluye canales ya presentes en `channels_processed`
-- Para cada canal en paralelo (Workers):
-  - Usa un pool persistente de procesos con la API Python de `yt-dlp`; cada proceso importa el source vendorizado una vez
-  - Mantiene `--ytdlp-mode subprocess` como rollback con el comando equivalente `python -m yt_dlp --dump-single-json --flat-playlist --playlist-end N --skip-download`
-  - Reclama canales atómicamente, con propietario y recuperación de claims vencidos
-  - Resuelve `yt_dlp` desde el source local vendorizado en `yt-dlp/yt-dlp`
-  - Corrige las fechas aproximadas recientes con el feed RSS y conserva una fecha aproximada si el video ya salió de su ventana
-  - Obtiene el primer video público desde el orden `Oldest` de `/videos`
-  - Si falla una consulta individual, usa `yt-dlp` sobre el video conocido o `--playlist-items -1`
-  - Persiste:
-    - `channels_raw` (metadata de canal)
-    - `channel_videos_raw` (últimos N videos del canal)
-    - `channels_processed` (marca idempotente; `success` o `failed`)
-  - Persiste canal, videos y estado procesado en una transacción
+La tabla de estadísticas queda lista en esa transacción, así que la API y la UI
+pueden mostrar el canal sin esperar una finalización global.
 
-Salida: tablas `channels_raw`, `channel_videos_raw`, `channels_processed`.
+## 4. Finalización
 
-Los resultados pendientes se reintentan sin repetir el descubrimiento del canal:
+La ejecución local de `yt_channel_discovery.py` inicializa el esquema y purga el
+staging pesado de forma predeterminada. En GitHub Actions el esquema se crea una
+sola vez; los workers usan `--skip-schema --skip-finalize` y un job final ejecuta:
 
 ```bash
-python yt_first_video_enrichment.py --workers 5 --batch-size 50
+python yt_channel_finalize.py --skip-schema --ES
 ```
 
-En GitHub Actions los workers omiten migraciones y finalización. Un único
-postproceso reintenta fechas pendientes, refresca `channel_stats` y purga las
-tablas staging cuando todos los workers terminan.
+Ese job corre incluso si falla un worker, trunca únicamente
+`discovery_videos_staging_{lang}` y reporta la cola pendiente. Conserva el
+historial de búsquedas y los candidatos que deben reintentarse; no refresca
+estadísticas. Si encuentra resultados todavía sin normalizar, marca primero su
+ejecución de búsqueda como fallida para que la query vuelva a ser elegible.
 
+El enriquecimiento pendiente del primer video puede ejecutarse por separado:
+
+```bash
+python yt_first_video_enrichment.py --workers 5 --batch-size 50 --ES
+```

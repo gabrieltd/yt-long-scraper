@@ -1,9 +1,8 @@
 """Manually compact the DB to marked channels and minimum UI data.
 
 This script is intentionally not wired into the pipeline. It keeps marked
-channel metadata/relevance and preserves channel_stats_* as an existing snapshot.
-Do not refresh channel_stats_* after this purge unless you accept losing the
-historical metrics that came from channel_videos_raw_*.
+channel metadata, relevance and the incrementally maintained channel_stats_* row,
+while removing tracked video detail and pipeline working data.
 """
 
 from __future__ import annotations
@@ -32,8 +31,8 @@ class PurgeCounts:
     unmarked_channels_processed: int
     channel_stats_rows: int
     channel_videos_raw: int
-    videos_normalized: int
-    videos_raw: int
+    discovery_videos_staging: int
+    channel_candidates: int
     search_runs: int
     channels_discovery_claims: int
 
@@ -46,8 +45,8 @@ def _table(base_name: str, language: str) -> str:
 
 def _staging_tables(language: str) -> list[str]:
     return [
-        _table("videos_normalized", language),
-        _table("videos_raw", language),
+        _table("discovery_videos_staging", language),
+        _table("channel_candidates", language),
         _table("search_runs", language),
         _table("channels_discovery_claims", language),
     ]
@@ -63,6 +62,7 @@ def _vacuum_tables(language: str) -> list[str]:
         *_staging_tables(language),
         _table("channels_raw", language),
         _table("channel_relevance", language),
+        _table("channel_stats", language),
         _table("channels_processed", language),
     ]
 
@@ -78,23 +78,31 @@ async def collect_counts(conn: asyncpg.Connection, language: str) -> PurgeCounts
     channels_processed = _table("channels_processed", language)
     channel_stats = _table("channel_stats", language)
     channel_videos_raw = _table("channel_videos_raw", language)
-    videos_normalized = _table("videos_normalized", language)
-    videos_raw = _table("videos_raw", language)
+    discovery_videos_staging = _table("discovery_videos_staging", language)
+    channel_candidates = _table("channel_candidates", language)
     search_runs = _table("search_runs", language)
     channels_discovery_claims = _table("channels_discovery_claims", language)
 
     marked_exists = (
         f"SELECT 1 FROM {channel_relevance} rel "
-        "WHERE rel.channel_url = {alias}.channel_url "
+        "WHERE rel.channel_key = {alias}.id "
         "AND rel.is_relevant IS NOT NULL"
     )
+
+    processed_is_marked = f"""
+        SELECT 1
+        FROM {channels_raw} cr
+        JOIN {channel_relevance} rel ON rel.channel_key = cr.id
+        WHERE cr.channel_url = cp.channel_url
+          AND rel.is_relevant IS NOT NULL
+    """
 
     return PurgeCounts(
         channels_raw=await _count(conn, f"SELECT COUNT(*) FROM {channels_raw}"),
         marked_channels=await _count(
             conn,
             f"""
-            SELECT COUNT(DISTINCT rel.channel_url)
+            SELECT COUNT(*)
             FROM {channel_relevance} rel
             WHERE rel.is_relevant IS NOT NULL
             """,
@@ -118,13 +126,15 @@ async def collect_counts(conn: asyncpg.Connection, language: str) -> PurgeCounts
             f"""
             SELECT COUNT(*)
             FROM {channels_processed} cp
-            WHERE NOT EXISTS ({marked_exists.format(alias="cp")})
+            WHERE NOT EXISTS ({processed_is_marked})
             """,
         ),
         channel_stats_rows=await _count(conn, f"SELECT COUNT(*) FROM {channel_stats}"),
         channel_videos_raw=await _count(conn, f"SELECT COUNT(*) FROM {channel_videos_raw}"),
-        videos_normalized=await _count(conn, f"SELECT COUNT(*) FROM {videos_normalized}"),
-        videos_raw=await _count(conn, f"SELECT COUNT(*) FROM {videos_raw}"),
+        discovery_videos_staging=await _count(
+            conn, f"SELECT COUNT(*) FROM {discovery_videos_staging}"
+        ),
+        channel_candidates=await _count(conn, f"SELECT COUNT(*) FROM {channel_candidates}"),
         search_runs=await _count(conn, f"SELECT COUNT(*) FROM {search_runs}"),
         channels_discovery_claims=await _count(
             conn,
@@ -141,9 +151,17 @@ async def purge_unmarked_data(conn: asyncpg.Connection, language: str) -> None:
 
     marked_exists = (
         f"SELECT 1 FROM {channel_relevance} rel "
-        "WHERE rel.channel_url = {alias}.channel_url "
+        "WHERE rel.channel_key = {alias}.id "
         "AND rel.is_relevant IS NOT NULL"
     )
+
+    processed_is_marked = f"""
+        SELECT 1
+        FROM {channels_raw} cr
+        JOIN {channel_relevance} rel ON rel.channel_key = cr.id
+        WHERE cr.channel_url = cp.channel_url
+          AND rel.is_relevant IS NOT NULL
+    """
 
     async with conn.transaction():
         await conn.execute(f"DELETE FROM {channel_relevance} WHERE is_relevant IS NULL")
@@ -156,7 +174,7 @@ async def purge_unmarked_data(conn: asyncpg.Connection, language: str) -> None:
         await conn.execute(
             f"""
             DELETE FROM {channels_processed} cp
-            WHERE NOT EXISTS ({marked_exists.format(alias="cp")})
+            WHERE NOT EXISTS ({processed_is_marked})
             """
         )
         await conn.execute(f"TRUNCATE TABLE {truncate_tables};")
@@ -178,10 +196,10 @@ def print_counts(title: str, counts: PurgeCounts) -> None:
     print(f"channel_relevance null rows to delete: {counts.relevance_null_rows}")
     print(f"channels_processed: {counts.channels_processed}")
     print(f"channels_processed to delete: {counts.unmarked_channels_processed}")
-    print(f"channel_stats snapshot rows kept: {counts.channel_stats_rows}")
+    print(f"channel_stats rows: {counts.channel_stats_rows}")
     print(f"channel_videos_raw to truncate: {counts.channel_videos_raw}")
-    print(f"videos_normalized to truncate: {counts.videos_normalized}")
-    print(f"videos_raw to truncate: {counts.videos_raw}")
+    print(f"discovery_videos_staging to truncate: {counts.discovery_videos_staging}")
+    print(f"channel_candidates to truncate: {counts.channel_candidates}")
     print(f"search_runs to truncate: {counts.search_runs}")
     print(f"channels_discovery_claims to truncate: {counts.channels_discovery_claims}")
 
@@ -233,10 +251,7 @@ async def async_main(args: argparse.Namespace) -> int:
         language = args.language
         before = await collect_counts(conn, language)
         print_counts(f"Before purge ({language})", before)
-        print(
-            "\nNote: channel_stats remains as a snapshot. Do not refresh it after "
-            "this purge unless you accept losing historical metrics."
-        )
+        print("\nNote: incrementally persisted channel_stats rows are kept for marked channels.")
 
         if args.dry_run:
             print("\nDry run only. No data was changed.")

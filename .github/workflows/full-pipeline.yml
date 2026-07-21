@@ -61,8 +61,45 @@ concurrency:
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
+  prepare-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-channel.txt
+
+      - name: Check database connectivity
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
+
+      - name: Ensure database schema once
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import asyncio
+          import db
+
+          language = "en" if "${{ inputs.language }}" == "EN" else "es"
+
+          async def main():
+              await db.init_db(language=language, ensure_schema=True)
+              await db.close_db()
+
+          asyncio.run(main())
+          PY
+
   # Step 1a: Calculate which discovery batches have pending queries
   prepare-discovery-matrix:
+    needs: prepare-schema
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
@@ -77,7 +114,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements-channel.txt
 
       - name: Check database connectivity
         env:
@@ -108,7 +145,7 @@ jobs:
           echo "Computed batch_size: ${TOTAL_QUERIES} (ceil(total / ${MAX_JOBS}))"
 
           # Build command with language flag
-          CMD="python run_discovery.py --check-batches --batch-size ${TOTAL_QUERIES}"
+          CMD="python run_discovery.py --check-batches --batch-size ${TOTAL_QUERIES} --skip-schema"
 
           if [ "${{ inputs.language }}" = "EN" ]; then
             CMD="$CMD --EN"
@@ -160,7 +197,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          CMD="python run_discovery.py --batch-size ${{ needs.prepare-discovery-matrix.outputs.batch_size }} --batch-index ${{ matrix.batch_index }}"
+          CMD="python run_discovery.py --batch-size ${{ needs.prepare-discovery-matrix.outputs.batch_size }} --batch-index ${{ matrix.batch_index }} --skip-schema"
 
           if [ "${{ inputs.language }}" = "EN" ]; then
             CMD="$CMD --EN"
@@ -188,7 +225,7 @@ jobs:
           $CMD
 
   channel-finalization:
-    needs: [prepare-channel-matrix, channel-discovery]
+    needs: [prepare-schema, discovery, normalization, prepare-channel-matrix, channel-discovery]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -208,7 +245,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/check_database_connection.py --expect-remote --timeout-seconds 20
 
-      - name: Refresh channel stats and purge staging once
+      - name: Purge heavy staging and report pending candidates
         if: ${{ always() }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -239,7 +276,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements-channel.txt
 
       - name: Check database connectivity
         env:
@@ -251,9 +288,9 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           if [ "${{ inputs.language }}" = "EN" ]; then
-            python yt_normalization_validation.py --EN
+            python yt_normalization_validation.py --skip-schema --EN
           else
-            python yt_normalization_validation.py --ES
+            python yt_normalization_validation.py --skip-schema --ES
           fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,7 +315,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements-channel.txt
 
       - name: Check database connectivity
         env:
@@ -292,32 +329,20 @@ jobs:
         run: |
           MAX_JOBS=${{ inputs.max_jobs }}
 
-          # Count pending channels using the DB query
+          # Count pending channels through the persistence API so workflow SQL
+          # stays in sync with the physical schema.
           PENDING=$(python - <<'EOF'
-          import asyncio, math, os, sys
-          sys.path.insert(0, ".")
+          import asyncio
           import db
 
           LANG = "en" if "${{ inputs.language }}" == "EN" else "es"
 
           async def count():
-              await db.init_db(language=LANG)
-              conn = db._DB_POOL  # use the underlying asyncpg pool
-              row = await conn.fetchrow("""
-                  SELECT COUNT(DISTINCT vn.channel_url) AS canales_pendientes
-                  FROM videos_normalized_{lang} vn
-                  LEFT JOIN channels_processed_{lang} cp ON vn.channel_url = cp.channel_url
-                  LEFT JOIN channels_discovery_claims_{lang} cdc
-                    ON vn.channel_url = cdc.channel_url
-                   AND cdc.claimed_at >= CURRENT_TIMESTAMP - INTERVAL '60 minutes'
-                  WHERE
-                      vn.validation_passed = TRUE
-                      AND vn.channel_url IS NOT NULL
-                      AND cp.channel_url IS NULL
-                      AND cdc.channel_url IS NULL
-              """.replace("{lang}", LANG))
-              await db.close_db()
-              return row["canales_pendientes"] if row else 0
+              await db.init_db(language=LANG, ensure_schema=False)
+              try:
+                  return await db.count_pending_channels_for_discovery()
+              finally:
+                  await db.close_db()
 
           count_val = asyncio.run(count())
           print(count_val)

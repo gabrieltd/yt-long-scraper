@@ -58,7 +58,6 @@ from db import (
 	purge_pipeline_staging_tables,
 	release_channel_discovery_claim,
 	release_channel_discovery_claims,
-	refresh_channel_stats,
 )
 
 
@@ -1067,23 +1066,14 @@ def run(
 			ytdlp_executor.shutdown(wait=True)
 			ytdlp_executor = None
 
-		if finalize and processed:
-			print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][stats] refreshing channel stats...\033[0m")
-			refreshed = bool(db.run(refresh_channel_stats(language)))
-			status = "refreshed" if refreshed else "already refreshing elsewhere"
-			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][stats] {status}\033[0m")
-
 		if finalize:
 			pending = int(db.run(count_pending_channels_for_discovery()))
-			if pending:
-				print(
-					f"\033[93m[{_utcnow().strftime('%H:%M:%S')}][purge-skip] "
-					f"preserving staging: {pending} channels remain pending\033[0m"
-				)
-			else:
-				print(f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] truncating pipeline staging tables for language={language}...\033[0m")
-				purged_tables = db.run(purge_pipeline_staging_tables(language))
-				print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] truncated: {', '.join(purged_tables)}\033[0m")
+			print(
+				f"\033[94m[{_utcnow().strftime('%H:%M:%S')}][purge] "
+				f"truncating heavy staging (pending candidates={pending})...\033[0m"
+			)
+			purged_tables = db.run(purge_pipeline_staging_tables(language))
+			print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][purge] cleaned: {', '.join(purged_tables)}\033[0m")
 
 		print(f"\033[92m[{_utcnow().strftime('%H:%M:%S')}][done] processed={processed} skipped={skipped} failed={failed}\033[0m")
 		print(

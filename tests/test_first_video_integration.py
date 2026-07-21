@@ -145,6 +145,7 @@ class PersistenceTests(unittest.TestCase):
 
     def test_channel_upsert_writes_new_first_video_columns(self) -> None:
         pool = mock.AsyncMock()
+        pool.fetchval.return_value = 123
         original = db._DB_POOL
         db._DB_POOL = pool
         try:
@@ -158,8 +159,9 @@ class PersistenceTests(unittest.TestCase):
             }))
         finally:
             db._DB_POOL = original
-        args = pool.execute.await_args.args
+        args = pool.fetchval.await_args.args
         self.assertIn("first_video_published_at", args[0])
+        self.assertIn("RETURNING id", args[0])
         self.assertEqual(len(args) - 1, 21)
         self.assertEqual(args[13], VIDEO_ID)
         self.assertIsInstance(args[14], datetime)

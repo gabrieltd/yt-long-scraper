@@ -504,6 +504,9 @@ def main() -> None:
 			# Pass language to init_db for table naming (convert locale to simple lang code)
 			language = "en" if args.lang == "en-US" else "es"
 			search_run_id = None
+			search_status = "failed"
+			search_result_count = 0
+			search_error = None
 			try:
 				await db.init_db(
 					language=language,
@@ -522,6 +525,7 @@ def main() -> None:
 					sort_by=args.sort_by,
 					debug_artifacts=args.debug_artifacts,
 				)
+				search_result_count = len(results)
 				print(config["messages"]["scraping_completed"].format(len(results)))
 				inserted, ignored = await db.insert_videos_raw(search_run_id, results)
 				print(config["messages"]["db_inserted"].format(inserted, ignored))
@@ -531,14 +535,21 @@ def main() -> None:
 					args.out.parent.mkdir(parents=True, exist_ok=True)
 					args.out.write_text(payload, encoding="utf-8")
 					print(config["messages"]["results_written"].format(args.out))
+				search_status = "success"
 			except Exception as e:
+				search_error = str(e)
 				print(f"⚠️ Error during execution: {e}")
 				raise
 			finally:
 				# Safely close DB even if there were errors
 				try:
 					if search_run_id:
-						await db.finish_search_run(search_run_id)
+						await db.finish_search_run(
+							search_run_id,
+							status=search_status,
+							result_count=search_result_count,
+							error=search_error,
+						)
 				except Exception as e:
 					print(f"⚠️ Error finishing search run: {e}")
 				try:

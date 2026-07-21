@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import re
 from dataclasses import dataclass
@@ -371,21 +372,30 @@ async def run_normalization(*, limit: int | None = None, bulk: bool = True) -> d
 	return stats
 
 
-async def main(language: str = "es") -> None:
+async def main(language: str = "es", *, ensure_schema: bool = True) -> None:
 	load_dotenv()
-	await db.init_db(language=language)
+	await db.init_db(language=language, ensure_schema=ensure_schema)
 	stats = await run_normalization()
 	await db.close_db()
 	print(stats)
 
 
-if __name__ == "__main__":
-	import argparse
+def _parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(description="Normalize and validate raw video data")
+	parser.add_argument(
+		"--skip-schema",
+		action="store_false",
+		dest="ensure_schema",
+		help="Use an already prepared database schema",
+	)
 	lang_group = parser.add_mutually_exclusive_group()
 	lang_group.add_argument("--EN", action="store_const", const="en", dest="lang", help="Use English tables")
 	lang_group.add_argument("--ES", action="store_const", const="es", dest="lang", help="Use Spanish tables (default)")
-	parser.set_defaults(lang="es")
-	args = parser.parse_args()
+	parser.set_defaults(lang="es", ensure_schema=True)
+	return parser
+
+
+if __name__ == "__main__":
+	args = _parser().parse_args()
 	
-	asyncio.run(main(args.lang))
+	asyncio.run(main(args.lang, ensure_schema=args.ensure_schema))

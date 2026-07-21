@@ -100,6 +100,11 @@ def _decode_cursor(cursor: str, sort_by: str, sort_order: str) -> tuple[Any, str
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ValueError("Invalid pagination cursor timestamp") from exc
+    elif sort_by == "last_upload_date" and isinstance(value, str):
+        try:
+            value = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("Invalid pagination cursor date") from exc
     return value, channel_url
 
 
@@ -111,6 +116,42 @@ def _utc_day_boundary(value: str, *, next_day: bool = False) -> datetime:
     if next_day:
         parsed += timedelta(days=1)
     return datetime.combine(parsed, time.min, tzinfo=timezone.utc)
+
+
+def _parse_date(value: str) -> date:
+    """Parse the historical YYYYMMDD contract as well as an ISO date."""
+    try:
+        text = value.strip()
+        if len(text) == 8 and text.isdigit():
+            return datetime.strptime(text, "%Y%m%d").date()
+        return date.fromisoformat(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid date: {value}") from exc
+
+
+def _format_yyyymmdd(value: date | datetime | str | None) -> str | None:
+    """Preserve the UI's historical compact date contract."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    text = str(value).strip()
+    if len(text) == 8 and text.isdigit():
+        return text
+    try:
+        return date.fromisoformat(text[:10]).strftime("%Y%m%d")
+    except ValueError:
+        return text
+
+
+def _video_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _thumbnail_url(video_id: str) -> str:
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 async def get_filtered_channels(
@@ -185,9 +226,9 @@ async def get_filtered_channels(
     if tag_filter:
         where_clauses.append(f"tags @> {_next([tag_filter])}")
     if last_uploaded_after:
-        where_clauses.append(f"last_upload_date >= {_next(last_uploaded_after)}")
+        where_clauses.append(f"last_upload_date >= {_next(_parse_date(last_uploaded_after))}")
     if last_uploaded_before:
-        where_clauses.append(f"last_upload_date <= {_next(last_uploaded_before)}")
+        where_clauses.append(f"last_upload_date <= {_next(_parse_date(last_uploaded_before))}")
     if first_video_after:
         where_clauses.append(
             f"first_video_published_at >= {_next(_utc_day_boundary(first_video_after))}"
@@ -235,8 +276,8 @@ async def get_filtered_channels(
                 rel.tags,
                 rel.marked_at
             FROM channels_raw_{lang} cr
-            JOIN channel_stats_{lang} stats ON cr.channel_url = stats.channel_url
-            LEFT JOIN channel_relevance_{lang} rel ON cr.channel_url = rel.channel_url
+            JOIN channel_stats_{lang} stats ON cr.id = stats.channel_key
+            LEFT JOIN channel_relevance_{lang} rel ON cr.id = rel.channel_key
         )
         SELECT *
         FROM channel_rows
@@ -257,7 +298,7 @@ async def get_filtered_channels(
             "avatar_url": row["avatar_url"],
             "subscriber_count": row["subscriber_count"],
             "is_verified": row["is_verified"],
-            "last_upload_date": row["last_upload_date"],
+            "last_upload_date": _format_yyyymmdd(row["last_upload_date"]),
             "first_video_id": row["first_video_id"],
             "first_video_published_at": (
                 row["first_video_published_at"].isoformat()
@@ -296,6 +337,7 @@ async def get_channel_details(
 
     channel_sql = f"""
         SELECT
+            cr.id AS channel_key,
             cr.channel_url,
             cr.channel_id,
             cr.channel_name,
@@ -319,14 +361,14 @@ async def get_channel_details(
             rel.notes,
             rel.tags
         FROM channels_raw_{lang} cr
-        JOIN channel_stats_{lang} stats ON stats.channel_url = cr.channel_url
-        LEFT JOIN channel_relevance_{lang} rel ON rel.channel_url = cr.channel_url
+        JOIN channel_stats_{lang} stats ON stats.channel_key = cr.id
+        LEFT JOIN channel_relevance_{lang} rel ON rel.channel_key = cr.id
         WHERE cr.channel_url = $1
     """
     videos_sql = f"""
-        SELECT video_id, title, video_url, thumbnail_url, upload_date, duration_seconds, view_count
+        SELECT video_id, title, upload_date, duration_seconds, view_count
         FROM channel_videos_raw_{lang}
-        WHERE channel_url = $1
+        WHERE channel_key = $1
         ORDER BY upload_date DESC NULLS LAST, view_count DESC NULLS LAST
     """
 
@@ -339,7 +381,7 @@ async def get_channel_details(
         )
         if channel_row is None:
             return None
-        video_rows = await conn.fetch(videos_sql, channel_url)
+        video_rows = await conn.fetch(videos_sql, channel_row["channel_key"])
 
     channel = {
         "channel_url": channel_row["channel_url"],
@@ -353,7 +395,7 @@ async def get_channel_details(
         "banner_url": channel_row["banner_url"],
         "uploader_id": channel_row["uploader_id"],
         "uploader_url": channel_row["uploader_url"],
-        "last_upload_date": channel_row["last_upload_date"],
+        "last_upload_date": _format_yyyymmdd(channel_row["last_upload_date"]),
         "first_video_id": channel_row["first_video_id"],
         "first_video_published_at": (
             channel_row["first_video_published_at"].isoformat()
@@ -372,9 +414,9 @@ async def get_channel_details(
         {
             "video_id": row["video_id"],
             "title": row["title"],
-            "video_url": row["video_url"],
-            "thumbnail_url": row["thumbnail_url"],
-            "upload_date": row["upload_date"],
+            "video_url": _video_url(row["video_id"]),
+            "thumbnail_url": _thumbnail_url(row["video_id"]),
+            "upload_date": _format_yyyymmdd(row["upload_date"]),
             "duration_seconds": row["duration_seconds"],
             "view_count": row["view_count"],
         }
@@ -399,9 +441,11 @@ async def set_channel_relevance(
 
     await pool.execute(
         f"""
-        INSERT INTO channel_relevance_{lang} (channel_url, is_relevant, notes, tags, marked_at)
-        VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-        ON CONFLICT (channel_url) DO UPDATE SET
+        INSERT INTO channel_relevance_{lang} (channel_key, is_relevant, notes, tags, marked_at)
+        SELECT id, $2, $3, $4, CURRENT_TIMESTAMP
+        FROM channels_raw_{lang}
+        WHERE channel_url = $1
+        ON CONFLICT (channel_key) DO UPDATE SET
             is_relevant = EXCLUDED.is_relevant,
             notes = EXCLUDED.notes,
             tags = EXCLUDED.tags,
@@ -426,17 +470,18 @@ async def set_channels_relevance_bulk(
     lang = _validate_lang(lang)
     pool = _require_pool()
 
-    tuples = [(url, is_relevant) for url in channel_urls]
-
-    await pool.executemany(
+    await pool.execute(
         f"""
-        INSERT INTO channel_relevance_{lang} (channel_url, is_relevant, notes, tags, marked_at)
-        VALUES ($1, $2, NULL, NULL, CURRENT_TIMESTAMP)
-        ON CONFLICT (channel_url) DO UPDATE SET
+        INSERT INTO channel_relevance_{lang} (channel_key, is_relevant, notes, tags, marked_at)
+        SELECT cr.id, $2, NULL, NULL::TEXT[], CURRENT_TIMESTAMP
+        FROM UNNEST($1::TEXT[]) AS requested(channel_url)
+        JOIN channels_raw_{lang} cr USING (channel_url)
+        ON CONFLICT (channel_key) DO UPDATE SET
             is_relevant = EXCLUDED.is_relevant,
             marked_at = CURRENT_TIMESTAMP
         """,
-        tuples
+        channel_urls,
+        is_relevant,
     )
 
 

@@ -126,6 +126,15 @@ python yt_channel_discovery.py --ytdlp-mode subprocess
 python yt_first_video_enrichment.py --workers 5 --batch-size 50
 ```
 
+**Uso de almacenamiento PostgreSQL (solo lectura):**
+```bash
+# ES y EN, con estimaciones rápidas de filas
+python scripts/report_db_storage.py
+
+# sólo ES y con conteos exactos (más costoso)
+python scripts/report_db_storage.py --ES --exact-rows
+```
+
 **Análisis de canal:**
 ```bash
 python yt_channel_analysis.py
