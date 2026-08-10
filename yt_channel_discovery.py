@@ -918,6 +918,7 @@ def run(
 	ensure_schema: bool = True,
 	finalize: bool = True,
 	ytdlp_mode: str = "process-pool",
+	enrich_first_video: bool = True,
 ) -> None:
 	"""Main orchestration: fetch candidates -> process in parallel workers.
 
@@ -960,17 +961,20 @@ def run(
 		)
 		oldest_video_client: YouTubeOldestVideoClient | None = None
 		oldest_video_client_error: str | None = None
-		try:
-			oldest_video_client = YouTubeOldestVideoClient.initialize(
-				timeout_seconds=first_video_timeout_seconds
-			)
-			print("\033[92m[info] YouTube first-video client initialized\033[0m")
-		except OldestVideoError as exc:
-			oldest_video_client_error = str(exc)
-			print(
-				"\033[91m[warning] first-video enrichment disabled for this run: "
-				f"{exc}\033[0m"
-			)
+		if enrich_first_video:
+			try:
+				oldest_video_client = YouTubeOldestVideoClient.initialize(
+					timeout_seconds=first_video_timeout_seconds
+				)
+				print("\033[92m[info] YouTube first-video client initialized\033[0m")
+			except OldestVideoError as exc:
+				oldest_video_client_error = str(exc)
+				print(
+					"\033[91m[warning] first-video enrichment disabled for this run: "
+					f"{exc}\033[0m"
+				)
+		else:
+			print("\033[94m[info] first-video enrichment skipped for this run\033[0m")
 
 		processed = 0
 		skipped = 0
@@ -1092,11 +1096,14 @@ def run(
 			pass
 		raise
 	finally:
-		if _STOP_EVENT.is_set():
-			try:
-				db.run(release_channel_discovery_claims(claim_owner))
-			except Exception:
-				pass
+		# Successful and terminal results remove their claim atomically while
+		# persisting. Transient failures intentionally keep it for the duration
+		# of this run so they are not reclaimed immediately, but every claim
+		# still owned by this run must be released when the run finishes.
+		try:
+			db.run(release_channel_discovery_claims(claim_owner))
+		except Exception:
+			pass
 		if worker_executor is not None:
 			worker_executor.shutdown(wait=False, cancel_futures=True)
 		if http_executor is not None:
@@ -1130,6 +1137,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	p.add_argument("--skip-schema", action="store_false", dest="ensure_schema")
 	p.add_argument("--skip-finalize", action="store_false", dest="finalize")
 	p.add_argument(
+		"--skip-first-video",
+		action="store_false",
+		dest="enrich_first_video",
+		help="Leave first-video metadata pending for the independent local command",
+	)
+	p.add_argument(
 		"--ytdlp-mode",
 		choices=("subprocess", "process-pool"),
 		default="process-pool",
@@ -1144,7 +1157,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	lang_group = p.add_mutually_exclusive_group()
 	lang_group.add_argument("--EN", action="store_const", const="en", dest="lang", help="Use English tables")
 	lang_group.add_argument("--ES", action="store_const", const="es", dest="lang", help="Use Spanish tables (default)")
-	p.set_defaults(lang="es", ensure_schema=True, finalize=True)
+	p.set_defaults(
+		lang="es",
+		ensure_schema=True,
+		finalize=True,
+		enrich_first_video=True,
+	)
 	return p
 
 
@@ -1167,6 +1185,7 @@ if __name__ == "__main__":
 			ensure_schema=args.ensure_schema,
 			finalize=args.finalize,
 			ytdlp_mode=args.ytdlp_mode,
+			enrich_first_video=args.enrich_first_video,
 		)
 	except KeyboardInterrupt:
 		_request_stop()

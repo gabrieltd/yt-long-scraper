@@ -40,7 +40,9 @@ Esto usa [docker-compose.yml](docker-compose.yml) y expone Postgres en `localhos
 
 Crea un `.env` (puedes copiar [`.env.example`](.env.example)). Variable clave:
 
-- `DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_discovery`
+- `DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_archive`
+- `LOCAL_DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_archive`
+- `SUPABASE_DATABASE_URL=postgresql://...` (origen temporal de GitHub Actions)
 
 Si cambias `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` o `POSTGRES_PORT`,
 mantén `DATABASE_URL` sincronizada con esos valores.
@@ -134,6 +136,25 @@ python scripts/report_db_storage.py
 # sólo ES y con conteos exactos (más costoso)
 python scripts/report_db_storage.py --ES --exact-rows
 ```
+
+**Archivar Supabase en PostgreSQL local:**
+```bash
+# Diagnóstico: no modifica ninguna base
+python scripts/archive_supabase_to_local.py --all
+
+# Copiar y verificar, conservando todavía los datos remotos
+python scripts/archive_supabase_to_local.py --all --copy
+
+# Copiar, verificar y liberar las tablas pesadas remotas
+python scripts/archive_supabase_to_local.py --all --copy --truncate-after-verify
+```
+
+El último comando debe ejecutarse cuando GitHub Actions esté inactivo. Bloquea
+las tablas persistentes con `NOWAIT`, rechaza claims activos y sólo ejecuta el
+`TRUNCATE` después de verificar la copia. `channels_processed`, `search_runs`,
+staging, candidatos y claims no se eliminan de Supabase. Para copiar debe usarse
+la conexión directa o el pooler de sesión de Supabase (`:5432`), no el pooler
+transaccional (`:6543`).
 
 **Análisis de canal:**
 ```bash

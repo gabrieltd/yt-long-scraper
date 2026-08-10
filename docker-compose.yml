@@ -6,16 +6,16 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-yt_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yt_password}
-      POSTGRES_DB: ${POSTGRES_DB:-yt_discovery}
+      POSTGRES_DB: ${POSTGRES_DB:-yt_archive}
     ports:
       - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_archive_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yt_user} -d ${POSTGRES_DB:-yt_discovery}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yt_user} -d ${POSTGRES_DB:-yt_archive}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
 volumes:
-  postgres_data:
+  postgres_archive_data:

@@ -95,3 +95,16 @@ base:
 python scripts/report_db_storage.py
 python scripts/report_db_storage.py --ES --exact-rows
 ```
+
+## Archivo local
+
+PostgreSQL local añade `archive_batches`, una tabla de auditoría que no existe
+en Supabase. Cada intento registra UUID, idioma, origen sin credenciales,
+estado (`running`, `verified`, `purged` o `failed`), cantidades, checksums y
+errores. Los reintentos son idempotentes por `channel_url`, `video_id` y UUID de
+búsqueda.
+
+La purga remota sólo trunca `channels_raw`, `channel_videos_raw`,
+`channel_stats` y `channel_relevance`. `channels_processed` y `search_runs`
+permanecen como deduplicación liviana; staging, candidatos y claims continúan
+bajo el control normal del pipeline.

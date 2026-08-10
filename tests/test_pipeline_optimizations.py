@@ -376,6 +376,37 @@ class DiscoveryOptimizationTests(unittest.TestCase):
             discovery._ACTIVE_YTDLP_PROCESSES.discard(process)
             discovery._STOP_EVENT.clear()
 
+    def test_discovery_releases_transient_claims_after_normal_run(self) -> None:
+        runner = mock.Mock()
+        runner.run.side_effect = lambda operation: (
+            0 if operation == "release-owned-claims" else None
+        )
+        with (
+            mock.patch.object(discovery, "_DBRunner", return_value=runner),
+            mock.patch.object(
+                discovery, "init_db", new=mock.Mock(return_value="init")
+            ),
+            mock.patch.object(
+                discovery, "close_db", new=mock.Mock(return_value="close")
+            ),
+            mock.patch.object(
+                discovery,
+                "release_channel_discovery_claims",
+                new=mock.Mock(return_value="release-owned-claims"),
+            ) as release_mock,
+            mock.patch.object(discovery, "_claim_channel_batch", return_value=[]),
+            mock.patch.object(
+                discovery.YouTubeOldestVideoClient,
+                "initialize",
+                return_value=mock.Mock(),
+            ),
+            mock.patch("builtins.print"),
+        ):
+            discovery.run(ytdlp_mode="subprocess", finalize=False)
+
+        release_mock.assert_called_once()
+        self.assertIn(mock.call("release-owned-claims"), runner.run.call_args_list)
+
 
 class EnrichmentBatchTests(unittest.TestCase):
     def test_enrichment_limits_active_window_and_does_not_reclaim_same_cycle(self) -> None:
@@ -505,6 +536,7 @@ class WorkflowTests(unittest.TestCase):
             text = (root / ".github" / "workflows" / filename).read_text(encoding="utf-8")
             self.assertIn("--skip-schema --skip-finalize", text)
             self.assertIn("--claim-batch-size 120", text)
+            self.assertIn("--skip-first-video", text)
             self.assertIn("channel-finalization:", text)
             self.assertNotIn("first-video-enrichment:", text)
             self.assertNotIn("yt_first_video_enrichment.py", text)
@@ -522,6 +554,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(full.count("run_discovery.py --"), 2)
         self.assertIn("db.count_pending_channels_for_discovery()", full)
         self.assertNotIn("SELECT COUNT(DISTINCT vn.channel_url)", full)
+
         self.assertEqual(full.count("yt_normalization_validation.py --skip-schema"), 2)
         parallel = (
             root / ".github" / "workflows" / "parallel-channel-discovery.yml"
@@ -529,6 +562,40 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("prepare-schema:", parallel)
         self.assertIn("needs: [prepare-matrix, prepare-schema]", parallel)
         self.assertIn("needs: [prepare-schema, channel-discovery]", parallel)
+
+    def test_channel_discovery_can_skip_first_video_for_actions(self) -> None:
+        args = discovery._build_arg_parser().parse_args(["--skip-first-video"])
+        self.assertFalse(args.enrich_first_video)
+
+        runner = mock.Mock()
+        runner.run.return_value = None
+        with (
+            mock.patch.object(discovery, "_DBRunner", return_value=runner),
+            mock.patch.object(
+                discovery, "init_db", new=mock.Mock(return_value="init")
+            ),
+            mock.patch.object(
+                discovery, "close_db", new=mock.Mock(return_value="close")
+            ),
+            mock.patch.object(
+                discovery,
+                "release_channel_discovery_claims",
+                new=mock.Mock(return_value="release"),
+            ),
+            mock.patch.object(discovery, "_claim_channel_batch", return_value=[]),
+            mock.patch.object(
+                discovery.YouTubeOldestVideoClient,
+                "initialize",
+            ) as initialize_mock,
+            mock.patch("builtins.print"),
+        ):
+            discovery.run(
+                ytdlp_mode="subprocess",
+                finalize=False,
+                enrich_first_video=False,
+            )
+
+        initialize_mock.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -3,7 +3,9 @@
 El proyecto usa PostgreSQL. Configure `DATABASE_URL` en `.env`; por ejemplo:
 
 ```dotenv
-DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_discovery
+DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_archive
+LOCAL_DATABASE_URL=postgresql://yt_user:yt_password@localhost:5432/yt_archive
+SUPABASE_DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@HOST:5432/postgres
 ```
 
 ## Instalación en Windows
@@ -65,6 +67,9 @@ atómicamente, por lo que no se necesita un refresh al terminar.
 La ejecución local purga automáticamente el staging pesado. Para conservarlo
 temporalmente puede usarse `--skip-finalize`.
 
+GitHub Actions añade `--skip-first-video`; así los workers remotos no consultan
+Innertube y el dato queda pendiente para `yt_first_video_enrichment.py` local.
+
 ### Operaciones independientes
 
 ```bash
@@ -77,9 +82,22 @@ python yt_channel_finalize.py --ES
 # Reporte de almacenamiento de ES y EN (sólo lectura)
 python scripts/report_db_storage.py
 
+# Diagnóstico del archivo remoto -> local (sin escrituras)
+python scripts/archive_supabase_to_local.py --all
+
+# Copia verificable sin borrar el origen
+python scripts/archive_supabase_to_local.py --all --copy
+
+# Drenar las tablas pesadas después de verificar
+python scripts/archive_supabase_to_local.py --all --copy --truncate-after-verify
+
 # Conteos exactos sólo para ES; puede ser más costoso
 python scripts/report_db_storage.py --ES --exact-rows
 ```
+
+La URL de Supabase para `--copy` debe ser directa o de pooler de sesión en el
+puerto 5432. El puerto 6543 sólo se admite en el diagnóstico porque una copia
+completa mantiene una transacción consistente durante más tiempo.
 
 ## GitHub Actions y runners preparados
 
@@ -100,4 +118,3 @@ no existen.
 - No trunque `channel_candidates` para liberar staging; esa tabla es la cola
   durable de reintentos.
 - Si YouTube cambia HTML o selectores, consulte [Troubleshooting](TROUBLESHOOTING.md).
-

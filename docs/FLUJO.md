@@ -37,8 +37,9 @@ El procesamiento por canal:
 
 - extrae metadata y videos con el pool persistente de procesos de yt-dlp;
 - permite `--ytdlp-mode subprocess` como modo de rollback;
-- consulta RSS en paralelo con el primer video para corregir fechas recientes;
-- obtiene y registra el primer video público;
+- consulta RSS para corregir fechas recientes;
+- puede obtener el primer video público en ejecuciones locales, pero los workers
+  de GitHub Actions usan `--skip-first-video` y lo dejan pendiente;
 - conserva fallos transitorios como pendientes para otro ciclo.
 
 En un éxito, una sola transacción persiste `channels_raw`, hace el upsert masivo
@@ -53,7 +54,8 @@ pueden mostrar el canal sin esperar una finalización global.
 
 La ejecución local de `yt_channel_discovery.py` inicializa el esquema y purga el
 staging pesado de forma predeterminada. En GitHub Actions el esquema se crea una
-sola vez; los workers usan `--skip-schema --skip-finalize` y un job final ejecuta:
+sola vez; los workers usan
+`--skip-schema --skip-finalize --skip-first-video` y un job final ejecuta:
 
 ```bash
 python yt_channel_finalize.py --skip-schema --ES
@@ -64,6 +66,18 @@ Ese job corre incluso si falla un worker, trunca únicamente
 historial de búsquedas y los candidatos que deben reintentarse; no refresca
 estadísticas. Si encuentra resultados todavía sin normalizar, marca primero su
 ejecución de búsqueda como fallida para que la query vuelva a ser elegible.
+
+## 5. Archivo remoto hacia PostgreSQL local
+
+Supabase puede funcionar como buffer de los workers y PostgreSQL Docker como
+histórico. `scripts/archive_supabase_to_local.py` copia canales, videos,
+relevancia e historial remapeando `channel_key` mediante `channel_url`.
+
+El modo predeterminado sólo reporta. `--copy` fusiona y verifica localmente; al
+añadir `--truncate-after-verify`, el comando rechaza claims activos, bloquea las
+tablas persistentes con `NOWAIT` y las trunca únicamente si todos los datos
+copiados coinciden. Los registros remotos de deduplicación y el trabajo temporal
+se conservan. La UI local usa `DATABASE_URL`; Actions mantiene su secreto remoto.
 
 El enriquecimiento pendiente del primer video puede ejecutarse por separado:
 
